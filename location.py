@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, calinski_harabasz_score
 from sklearn.cluster import KMeans
 
 import optuna
@@ -273,39 +273,112 @@ def dynamic_thresholds(scores: pd.Series, k: int) -> List[float]:
 # 7 · Risk Skoru & Pipeline
 # ---------------------------------------------------------------------------
 
+def analyze_features(df: pd.DataFrame, weights: dict[str,float]) -> pd.DataFrame:
+    """
+    Özelliklerin önem analizi ve grup bazlı katkıları
+    """
+    analysis = []
+    total_weight = sum(weights.values())
+    
+    for group, meta in GROUPS.items():
+        group_features = meta['features']
+        group_weight = sum(weights[f] for f in group_features)
+        group_contribution = (group_weight / total_weight) * 100
+        
+        for feature in group_features:
+            feature_weight = weights[feature]
+            feature_contribution = (feature_weight / total_weight) * 100
+            
+            analysis.append({
+                'Grup': group,
+                'Özellik': feature,
+                'Grup_Öncelik': meta['priority'],
+                'Özellik_Ağırlık': feature_weight,
+                'Grup_Katkı_%': group_contribution,
+                'Özellik_Katkı_%': feature_contribution
+            })
+    
+    return pd.DataFrame(analysis)
+
+def evaluate_clustering(scores: pd.Series, k: int) -> Dict[str, float]:
+    """
+    K-means kümeleme performans metrikleri
+    """
+    X = scores.values.reshape(-1, 1)
+    kmeans = KMeans(n_clusters=k, random_state=42).fit(X)
+    labels = kmeans.labels_
+    
+    metrics = {
+        'Silhouette_Score': silhouette_score(X, labels),
+        'Calinski_Harabasz_Score': calinski_harabasz_score(X, labels),
+        'Inertia': kmeans.inertia_
+    }
+    
+    return metrics
+
 def pipeline(use_optuna: bool=False, k_thresholds: int = 4):
+    print("\n=== Risk Skorlama Sistemi Başlatılıyor ===\n")
+    
+    # Veri yükleme ve ön işleme
     df = load_data(CSV_IN)
     df = feature_engineering(df)
+    
+    # Feature kontrolü
     core = [f for grp in GROUPS.values() for f in grp['features']]
     missing = [c for c in core if c not in df.columns]
     if missing:
         raise ValueError(f'Missing features: {missing}')
-
+    
+    print(f"Toplam özellik sayısı: {len(core)}")
+    print("Özellik grupları:")
+    for group, meta in GROUPS.items():
+        print(f"- {group}: {len(meta['features'])} özellik (öncelik: {meta['priority']})")
+    
     # Ölçekleme ve yön invert
     df = robust_scale(df, core)
     df = apply_directions(df)
-
+    
     # Risk skoru hesapla
     weights = compute_weights()
     df['Risk_Skoru'] = 100 * df[core].mul(pd.Series(weights)).sum(axis=1) / sum(weights.values())
-
-    # Dinamik eşikler (k_thresh küme sayısı)
+    
+    # Özellik analizi
+    feature_analysis = analyze_features(df, weights)
+    print("\n=== Özellik Katkı Analizi ===")
+    print(feature_analysis.groupby('Grup')[['Grup_Katkı_%']].mean())
+    
+    # Optimal k belirleme
+    if k_thresholds == 0:  # Otomatik k belirleme
+        k_thresholds = choose_k_elbow(df['Risk_Skoru'])
+    
+    # Kümeleme performans analizi
+    cluster_metrics = evaluate_clustering(df['Risk_Skoru'], k_thresholds)
+    print("\n=== Kümeleme Performans Metrikleri ===")
+    for metric, value in cluster_metrics.items():
+        print(f"{metric}: {value:.4f}")
+    
+    # Dinamik eşikler
     thresholds = dynamic_thresholds(df['Risk_Skoru'], k=k_thresholds)
     bins = [-np.inf] + thresholds + [np.inf]
-    # Sınıf etiketleri otomatik oluşturulur: Low, Mid..., High
+    
+    # Risk sınıfları
     num_classes = len(bins) - 1
     if num_classes == 3:
         labels = ['Low-Risk', 'Mid-Risk', 'High-Risk']
     else:
         labels = [f'Risk-Group-{i+1}' for i in range(num_classes)]
-
+    
     df['Risk_Sınıfı'] = pd.cut(df['Risk_Skoru'], bins=bins, labels=labels, include_lowest=True)
-
+    
+    # Sınıf dağılımı
+    class_dist = df['Risk_Sınıfı'].value_counts()
+    print("\n=== Risk Sınıfı Dağılımı ===")
+    print(class_dist)
+    
     # Çıktı
     Path(CSV_OUT).parent.mkdir(parents=True, exist_ok=True)
-    df.to_excel(CSV_OUT)
-    print(f'✔ Risk skorları ({num_classes} sınıf) kaydedildi → {CSV_OUT}')
+    df.to_csv(CSV_OUT)
+    print(f'\n✔ Risk skorları ({num_classes} sınıf) kaydedildi → {CSV_OUT}')
 
 if __name__=='__main__':
-    # pipeline(use_optuna=True) ile ağırlık optimizasyonu da yapılabilir.
     pipeline(use_optuna=False, k_thresholds=4)
