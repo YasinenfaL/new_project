@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import silhouette_score
+from sklearn.cluster import KMeans
+
 import optuna
 
 
@@ -208,74 +210,61 @@ def robust_scale(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df
 
 
-def apply_directions(df: pd.DataFrame, dirs: dict[str,str]) -> pd.DataFrame:
-    for feat, dir in dirs.items():
-        if dir == 'neg':
-            df[feat] = 1 - df[feat]
-    return df
+def apply_directions(df: pd.DataFrame) -> pd.DataFrame:
+    df2 = df.copy()
+    for feat, dir in DIRECTIONS.items():
+        if dir == 'neg': df2[feat] = 1 - df2[feat]
+    return df2
 
 # ---------------------------------------------------------------------------
 # 5 · Ağırlıklar
 # ---------------------------------------------------------------------------
 
 def compute_weights() -> dict[str,float]:
-    w: dict[str,float] = {}
-    for grp,meta in GROUPS.items():
-        weight = meta['priority']/len(meta['features'])
-        for feat in meta['features']:
-            w[feat] = weight
+    w = {}
+    for grp in GROUPS.values():
+        pr = grp['priority']/len(grp['features'])
+        for f in grp['features']: w[f] = pr
     return w
 
 # ---------------------------------------------------------------------------
-# 6 · Risk Skoru Hesaplama & Optimizasyon
+# 6 · Dinamik Eşik: KMeans
 # ---------------------------------------------------------------------------
 
-def weighted_risk(df: pd.DataFrame, weights: dict[str,float]) -> pd.Series:
-    total = sum(weights.values())
-    return 100 * df[list(weights)].mul(pd.Series(weights)).sum(axis=1) / total
-
-
-def optimize_weights(df: pd.DataFrame, features: List[str], n_trials: int = 50) -> dict[str,float]:
-    def objective(trial):
-        w = {feat: trial.suggest_float(feat, 0, 5) for feat in features}
-        score = df[features].mul(pd.Series(w)).sum(axis=1)
-        labels = pd.qcut(score, 3, labels=False, duplicates='drop')
-        try:
-            return silhouette_score(df[features], labels)
-        except:
-            return -1
-    study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=n_trials)
-    return study.best_params
+def dynamic_thresholds(scores: pd.Series, k: int = 4) -> list[float]:
+    X = scores.values.reshape(-1,1)
+    km = KMeans(n_clusters=k, random_state=42).fit(X)
+    cents = sorted(km.cluster_centers_.flatten())
+    return [(cents[i] + cents[i+1])/2 for i in range(len(cents)-1)]
 
 # ---------------------------------------------------------------------------
-# 7 · Pipeline
+# 7 · Risk Skoru & Pipeline
 # ---------------------------------------------------------------------------
 
-def pipeline(use_optuna: bool = False):
+def pipeline(use_optuna: bool=False):
     df = load_data(CSV_IN)
     df = feature_engineering(df)
-
     core = [f for grp in GROUPS.values() for f in grp['features']]
     missing = [c for c in core if c not in df.columns]
-    if missing:
-        raise ValueError(f'Missing features: {missing}')
+    if missing: raise ValueError(f'Missing: {missing}')
 
     df = robust_scale(df, core)
-    df = apply_directions(df, DIRECTIONS)
+    df = apply_directions(df)
 
-    if use_optuna:
-        print('Optimizing weights...')
-        weights = optimize_weights(df, core)
-    else:
-        weights = compute_weights()
+    # ağırlık
+    w = compute_weights()
+    df['Risk_Skoru'] = 100 * df[core].mul(pd.Series(w)).sum(axis=1) / sum(w.values())
 
-    df['Risk_Skoru'] = weighted_risk(df, weights)
-    df['Risk_Sınıfı'] = pd.cut(df['Risk_Skoru'], bins=[-np.inf,35,65,np.inf], labels=['Low-Risk','Mid-Risk','High-Risk'])
+    # dinamik eşik
+    thr = dynamic_thresholds(df['Risk_Skoru'], k=4)
+    df['Risk_Sınıfı'] = pd.cut(
+        df['Risk_Skoru'], bins=[-np.inf, thr[1], thr[2], np.inf],
+        labels=['Low-Risk','Mid-Risk','High-Risk']
+    )
 
-    Path(CSV_OUT).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(CSV_OUT)
+    Path(CSV_OUT).parent.mkdir(parents=True,exist_ok=True)
+    df.to_excel(CSV_OUT)
     print(f'✔ Risk skorları kaydedildi → {CSV_OUT}')
 
-if __name__ == '__main__':
-    pipeline(use_optuna=False)
+if __name__=='__main__':
+    pipeline()
