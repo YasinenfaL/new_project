@@ -98,9 +98,17 @@ def compute_weights_prior() -> Dict[str, float]:
 
 
 def optimize_weights(df: pd.DataFrame, features: List[str], trials: int, prior: Dict[str, float]) -> Dict[str, float]:
+    # Validate features
+    missing_features = [f for f in features if f not in df.columns]
+    if missing_features:
+        raise ValueError(f"Missing features in DataFrame: {missing_features}")
+        
     def objective(trial: optuna.Trial):
-        params = {feat: trial.suggest_float(feat, 0.0, 5.0, step=0.01, default=prior.get(feat)) for feat in features}
-        w = np.array(list(params.values())); w /= w.sum()
+        params = {feat: trial.suggest_float(feat, 0.0, 5.0, step=0.01) for feat in features}
+        w = np.array(list(params.values()))
+        if len(w) != len(features):
+            raise ValueError(f"Weight vector length ({len(w)}) does not match features length ({len(features)})")
+        w /= w.sum()
         scores = df[features].dot(w)
         km = KMeans(n_clusters=3, random_state=42).fit(scores.values.reshape(-1,1))
         ch = calinski_harabasz_score(scores.values.reshape(-1,1), km.labels_)
@@ -135,7 +143,20 @@ def run_pipeline(
     comps = {}
     for name, groups in COMPOSITES.items():
         feats = [f for g in groups for f in GROUPS[g]['features']]
-        comps[name] = df[feats].dot(pd.Series(w_opt)) / sum(w_opt[f] for f in feats)
+        # Validate features exist
+        missing_feats = [f for f in feats if f not in df.columns]
+        if missing_feats:
+            print(f"Warning: Missing features for {name}: {missing_feats}")
+            continue
+            
+        # Validate weights exist
+        missing_weights = [f for f in feats if f not in w_opt]
+        if missing_weights:
+            print(f"Warning: Missing weights for {name}: {missing_weights}")
+            continue
+            
+        weights = pd.Series([w_opt[f] for f in feats], index=feats)
+        comps[name] = df[feats].dot(weights) / weights.sum()
     comp_df = pd.DataFrame(comps)
 
     df['Risk_Skoru'] = comp_df.mean(axis=1)*100
