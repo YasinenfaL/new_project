@@ -11,6 +11,15 @@ from sklearn.cluster import KMeans
 import optuna
 
 
+# — Gelir Eşitsizliği —
+    df["max_min_income_ratio"] = df["Maksimum Hane Geliri"] / (df["Minimum Hane Geliri"] + 1)
+    df["income_gini_proxy"] = (
+        df["Maksimum Hane Geliri"] - df["Minimum Hane Geliri"]
+    ) / (df["Aylık Ortalama Hane Geliri"] + 1)
+
+    # — Yoğunluk —
+    df["population_density"] = df["Toplam Nüfus"] / (df["Alan Büyüklüğü / km2"] + 1e-6)
+
 import warnings
 warnings.filterwarnings('ignore')
 warnings.filterwarnings('ignore', category=DeprecationWarning)
