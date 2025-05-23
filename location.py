@@ -316,7 +316,65 @@ def evaluate_clustering(scores: pd.Series, k: int) -> Dict[str, float]:
     
     return metrics
 
-def pipeline(use_optuna: bool=False, k_thresholds: int = 4):
+def optimize_weights(df: pd.DataFrame, features: List[str], n_trials: int = 50) -> Dict[str, float]:
+    """
+    Optuna ile özellik ağırlıklarını optimize eder
+    """
+    def objective(trial):
+        w = {feat: trial.suggest_float(feat, 0, 5) for feat in features}
+        score = df[features].mul(pd.Series(w)).sum(axis=1)
+        labels = pd.qcut(score, 3, labels=False, duplicates='drop')
+        try:
+            return silhouette_score(df[features], labels)
+        except:
+            return -1
+            
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials)
+    return study.best_params
+
+def analyze_optuna_weights(optimized_weights: Dict[str, float]) -> pd.DataFrame:
+    """
+    Optuna ile optimize edilmiş ağırlıkların grup bazlı analizi
+    """
+    analysis = []
+    total_weight = sum(optimized_weights.values())
+    
+    # Grup bazlı toplam ve normalize ağırlıklar
+    group_weights = {}
+    for group, meta in GROUPS.items():
+        group_features = meta['features']
+        group_weight = sum(optimized_weights[f] for f in group_features)
+        group_weights[group] = {
+            'Toplam_Ağırlık': group_weight,
+            'Normalize_Ağırlık': (group_weight / total_weight) * 100,
+            'Özellik_Sayısı': len(group_features),
+            'Orjinal_Öncelik': meta['priority']
+        }
+        
+        # Özellik bazlı detaylar
+        for feature in group_features:
+            feature_weight = optimized_weights[feature]
+            analysis.append({
+                'Grup': group,
+                'Özellik': feature,
+                'Orjinal_Öncelik': meta['priority'],
+                'Optuna_Ağırlık': feature_weight,
+                'Normalize_Ağırlık': (feature_weight / total_weight) * 100
+            })
+    
+    # Grup özetini yazdır
+    print("\n=== Optuna Grup Ağırlık Analizi ===")
+    for group, stats in group_weights.items():
+        print(f"\n{group}:")
+        print(f"  Toplam Ağırlık: {stats['Toplam_Ağırlık']:.2f}")
+        print(f"  Normalize Ağırlık: %{stats['Normalize_Ağırlık']:.2f}")
+        print(f"  Özellik Sayısı: {stats['Özellik_Sayısı']}")
+        print(f"  Orjinal Öncelik: {stats['Orjinal_Öncelik']}")
+    
+    return pd.DataFrame(analysis)
+
+def pipeline(use_optuna: bool=False, k_thresholds: int = 4, n_trials: int = 50):
     print("\n=== Risk Skorlama Sistemi Başlatılıyor ===\n")
     
     # Veri yükleme ve ön işleme
@@ -339,7 +397,17 @@ def pipeline(use_optuna: bool=False, k_thresholds: int = 4):
     df = apply_directions(df)
     
     # Risk skoru hesapla
-    weights = compute_weights()
+    if use_optuna:
+        print(f"\nOptuna ile ağırlık optimizasyonu başlatılıyor... ({n_trials} deneme)")
+        weights = optimize_weights(df, core, n_trials=n_trials)
+        
+        # Optuna sonuçlarının analizi
+        optuna_analysis = analyze_optuna_weights(weights)
+        print("\n=== Optuna Özellik Bazlı Analiz ===")
+        print(optuna_analysis.sort_values('Normalize_Ağırlık', ascending=False).head(10))
+    else:
+        weights = compute_weights()
+    
     df['Risk_Skoru'] = 100 * df[core].mul(pd.Series(weights)).sum(axis=1) / sum(weights.values())
     
     # Özellik analizi
@@ -377,8 +445,8 @@ def pipeline(use_optuna: bool=False, k_thresholds: int = 4):
     
     # Çıktı
     Path(CSV_OUT).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(CSV_OUT)
+    df.to_excel(CSV_OUT)
     print(f'\n✔ Risk skorları ({num_classes} sınıf) kaydedildi → {CSV_OUT}')
 
 if __name__=='__main__':
-    pipeline(use_optuna=False, k_thresholds=4)
+    pipeline(use_optuna=True, k_thresholds=4, n_trials=50)
