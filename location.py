@@ -228,43 +228,84 @@ def compute_weights() -> dict[str,float]:
     return w
 
 # ---------------------------------------------------------------------------
-# 6 · Dinamik Eşik: KMeans
+# 6 · K determini: Elbow Method ile otomatik belirleme
 # ---------------------------------------------------------------------------
-
-def dynamic_thresholds(scores: pd.Series, k: int = 4) -> list[float]:
+def choose_k_elbow(scores: pd.Series, k_min: int = 2, k_max: int = 10) -> int:
+    """
+    Inertia değerleri üzerinden elbow metoduyla optimal k sayısını bulur.
+    Basit second-derivative yöntemi.
+    """
     X = scores.values.reshape(-1,1)
-    km = KMeans(n_clusters=k, random_state=42).fit(X)
-    cents = sorted(km.cluster_centers_.flatten())
-    return [(cents[i] + cents[i+1])/2 for i in range(len(cents)-1)]
+    inertias = []
+    ks = list(range(k_min, k_max+1))
+    for k in ks:
+        km = KMeans(n_clusters=k, random_state=42).fit(X)
+        inertias.append(km.inertia_)
+    # Birinci ve ikinci farkları al
+    diffs = np.diff(inertias)
+    diff2 = np.diff(diffs)
+    # Elbow noktası diff2 en büyük olan k konumunda (offset by k_min+1)
+    elbow_idx = np.argmax(-diff2) + 2  # +2 adjusts to ks index
+    k_opt = ks[elbow_idx]
+    print(f"Elbow Method: inertias={dict(zip(ks, inertias))}")
+    print(f"Optimal k (Elbow): {k_opt}")
+    return k_opt
+
+def dynamic_thresholds(scores: pd.Series, k: int) -> List[float]:
+    """
+    K-means clustering kullanarak dinamik eşik değerleri belirler
+    """
+    X = scores.values.reshape(-1, 1)
+    kmeans = KMeans(n_clusters=k, random_state=42).fit(X)
+    
+    # Küme merkezlerini sırala ve eşik değerlerini belirle
+    centers = sorted(kmeans.cluster_centers_.flatten())
+    thresholds = []
+    
+    # Ardışık merkezlerin ortalamasını al
+    for i in range(len(centers)-1):
+        threshold = (centers[i] + centers[i+1]) / 2
+        thresholds.append(threshold)
+    
+    return thresholds
 
 # ---------------------------------------------------------------------------
 # 7 · Risk Skoru & Pipeline
 # ---------------------------------------------------------------------------
 
-def pipeline(use_optuna: bool=False):
+def pipeline(use_optuna: bool=False, k_thresholds: int = 4):
     df = load_data(CSV_IN)
     df = feature_engineering(df)
     core = [f for grp in GROUPS.values() for f in grp['features']]
     missing = [c for c in core if c not in df.columns]
-    if missing: raise ValueError(f'Missing: {missing}')
+    if missing:
+        raise ValueError(f'Missing features: {missing}')
 
+    # Ölçekleme ve yön invert
     df = robust_scale(df, core)
     df = apply_directions(df)
 
-    # ağırlık
-    w = compute_weights()
-    df['Risk_Skoru'] = 100 * df[core].mul(pd.Series(w)).sum(axis=1) / sum(w.values())
+    # Risk skoru hesapla
+    weights = compute_weights()
+    df['Risk_Skoru'] = 100 * df[core].mul(pd.Series(weights)).sum(axis=1) / sum(weights.values())
 
-    # dinamik eşik
-    thr = dynamic_thresholds(df['Risk_Skoru'], k=4)
-    df['Risk_Sınıfı'] = pd.cut(
-        df['Risk_Skoru'], bins=[-np.inf, thr[1], thr[2], np.inf],
-        labels=['Low-Risk','Mid-Risk','High-Risk']
-    )
+    # Dinamik eşikler (k_thresh küme sayısı)
+    thresholds = dynamic_thresholds(df['Risk_Skoru'], k=k_thresholds)
+    bins = [-np.inf] + thresholds + [np.inf]
+    # Sınıf etiketleri otomatik oluşturulur: Low, Mid..., High
+    num_classes = len(bins) - 1
+    if num_classes == 3:
+        labels = ['Low-Risk', 'Mid-Risk', 'High-Risk']
+    else:
+        labels = [f'Risk-Group-{i+1}' for i in range(num_classes)]
 
-    Path(CSV_OUT).parent.mkdir(parents=True,exist_ok=True)
+    df['Risk_Sınıfı'] = pd.cut(df['Risk_Skoru'], bins=bins, labels=labels, include_lowest=True)
+
+    # Çıktı
+    Path(CSV_OUT).parent.mkdir(parents=True, exist_ok=True)
     df.to_excel(CSV_OUT)
-    print(f'✔ Risk skorları kaydedildi → {CSV_OUT}')
+    print(f'✔ Risk skorları ({num_classes} sınıf) kaydedildi → {CSV_OUT}')
 
 if __name__=='__main__':
-    pipeline()
+    # pipeline(use_optuna=True) ile ağırlık optimizasyonu da yapılabilir.
+    pipeline(use_optuna=False, k_thresholds=4)
