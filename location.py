@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Dict, List, Optional
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -10,9 +7,12 @@ import seaborn as sns
 from sklearn.cluster import (
     KMeans, SpectralClustering, AgglomerativeClustering, DBSCAN, OPTICS
 )
-from sklearn.metrics import silhouette_score
-from sklearn.mixture import GaussianMixture
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 from sklearn.preprocessing import RobustScaler
+from sklearn.manifold import TSNE
+
+import warnings
+warnings.filterwarnings('ignore')
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -127,72 +127,69 @@ def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3 · Ölçekleme
+# Ölçekleme
 # ─────────────────────────────────────────────────────────────────────────────
-
-def scale_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+def scale_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     scaler = RobustScaler()
     df[cols] = scaler.fit_transform(df[cols])
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4 · Permutation Importance Fonksiyonu
+# Risk Ataması
 # ─────────────────────────────────────────────────────────────────────────────
-
-def permutation_importance(X: pd.DataFrame, base_labels: np.ndarray, clusterer, metric_func) -> pd.Series:
-    """
-    Her özellik için; değerleri permute et, yeniden kümele, metric düşüşünü ölç.
-    metric_func(X, labels)
-    """
-    baseline = metric_func(X, base_labels)
-    imp = {}
-    for col in X.columns:
-        scores = []
-        for _ in range(PERMUTE_ROUNDS):
-            X_perm = X.copy()
-            X_perm[col] = np.random.permutation(X_perm[col].values)
-            labels_perm = clusterer.fit_predict(X_perm)
-            scores.append(baseline - metric_func(X_perm, labels_perm))
-        imp[col] = np.mean(scores)
-    return pd.Series(imp).sort_values(ascending=False)
+def assign_risk(df: pd.DataFrame, cluster_col: str, features: list[str]) -> pd.Series:
+    summary = df.groupby(cluster_col)[features].median().mean(axis=1)
+    order = summary.sort_values().index
+    risk_labels = ["High-Risk", "Mid-Risk", "Low-Risk"]
+    risk_map = {cluster: risk_labels[min(i, 2)] for i, cluster in enumerate(order)}
+    return df[cluster_col].map(risk_map)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5 · Kümeleme ve Analiz
+# t-SNE Görselleştirme
 # ─────────────────────────────────────────────────────────────────────────────
+def plot_tsne(X: pd.DataFrame, labels, title: str):
+    tsne = TSNE(n_components=2, random_state=42)
+    X_emb = tsne.fit_transform(X)
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(x=X_emb[:, 0], y=X_emb[:, 1], hue=labels, palette='tab10')
+    plt.title(title)
+    plt.show()
 
-def cluster_and_analyze(df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
+# ─────────────────────────────────────────────────────────────────────────────
+# Kümeleme & Analiz
+# ─────────────────────────────────────────────────────────────────────────────
+def cluster_and_analyze(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     X = df[features].astype(float)
-    results = {}
 
-    # Kullanılacak algoritmalar
     algos = {
         "KMeans": KMeans(n_clusters=N_CLUSTERS, random_state=42),
-        "Spectral": SpectralClustering(n_clusters=N_CLUSTERS, assign_labels="kmeans", random_state=42),
-        "Agglomerative": AgglomerativeClustering(n_clusters=N_CLUSTERS, linkage="ward"),
+        "Spectral": SpectralClustering(n_clusters=N_CLUSTERS, random_state=42),
+        "Agglomerative": AgglomerativeClustering(n_clusters=N_CLUSTERS),
         "DBSCAN": DBSCAN(eps=0.8, min_samples=10),
-        "OPTICS": OPTICS(min_samples=10, xi=0.05, min_cluster_size=0.02)
+        "OPTICS": OPTICS(min_samples=10)
     }
 
     for name, model in algos.items():
         labels = model.fit_predict(X)
         df[f"{name}_id"] = labels
-        # Metric: silhouette sadece etiketli kümeler
-        sil = silhouette_score(X, labels) if len(set(labels))>1 else np.nan
-        print(f"{name} silhouette: {sil:.3f}")
-        # Feature importance
-        imp = permutation_importance(X, labels, model, silhouette_score)
-        top_feat = imp.head(10)
-        print(f"{name} top features:\n", top_feat)
-        # Görsel
-        top_feat.plot(kind='bar', title=f"{name} Permutation Importance")
-        plt.tight_layout(); plt.show()
+
+        if len(set(labels)) > 1:
+            sil = silhouette_score(X, labels)
+            calinski = calinski_harabasz_score(X, labels)
+            davies = davies_bouldin_score(X, labels)
+            print(f"{name} | Silhouette: {sil:.3f}, Calinski: {calinski:.1f}, Davies-Bouldin: {davies:.3f}")
+        else:
+            print(f"{name}: Tek küme bulundu.")
+
+        df[f"{name}_risk"] = assign_risk(df, f"{name}_id", features)
+
+        plot_tsne(X, labels, title=f"{name} t-SNE Görselleştirme")
 
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6 · Pipeline
+# Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
-
 def pipeline():
     df = load_data(CSV_IN)
     df = feature_engineering(df)
@@ -202,8 +199,7 @@ def pipeline():
     save_data(df, CSV_OUT)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Çalıştır
+# Main
 # ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     pipeline()
