@@ -10,18 +10,26 @@ import seaborn as sns
 from sklearn.cluster import (
     KMeans, SpectralClustering, AgglomerativeClustering, DBSCAN, OPTICS
 )
-from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import RobustScaler
+
+import warnings
+warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sabitler – ihtiyaca göre güncelle
 # ─────────────────────────────────────────────────────────────────────────────
 CSV_IN: str = "data.csv"              # Girdi CSV yolunu ayarla
 CSV_OUT: str = "risk_segmented.csv"   # Çıktı CSV yolunu ayarla
-VAR_RATIO: float = 0.95                # PCA toplam varyans eşiği
-N_COMPONENTS: Optional[int] = None     # Sabit PCA bileşen sayısı (None = otomatik)
+N_CLUSTERS = 4      # Küme sayısı (PCA kaldırıldı, doğrudan özelliklerle)
+PERMUTE_ROUNDS = 10 # Her özellik için permutation tekrarı
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1.  I/O
@@ -111,7 +119,9 @@ def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
                  "Bekar Kişi Sayısı",
                  "Evli Kişi Sayısı",
                  "Fay Puan",
-                 ])
+                 ],inplace=True,axis=1)
+    df = df.replace([np.inf, -np.inf], 0)
+    df = df.fillna(0)
 
 
     return df
@@ -126,90 +136,61 @@ def scale_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4 · PCA indirgeme
+# 4 · Permutation Importance Fonksiyonu
 # ─────────────────────────────────────────────────────────────────────────────
 
-def pca_reduce(
-    df_num: pd.DataFrame,
-    *, var_ratio: float,
-    n_components: Optional[int]
-) -> Tuple[pd.DataFrame, PCA]:
-    pca = PCA(n_components=n_components if n_components else var_ratio, random_state=42)
-    comps = pca.fit_transform(df_num)
-    pc_cols = [f"PC{i+1}" for i in range(comps.shape[1])]
-    return pd.DataFrame(comps, index=df_num.index, columns=pc_cols), pca
+def permutation_importance(X: pd.DataFrame, base_labels: np.ndarray, clusterer, metric_func) -> pd.Series:
+    """
+    Her özellik için; değerleri permute et, yeniden kümele, metric düşüşünü ölç.
+    metric_func(X, labels)
+    """
+    baseline = metric_func(X, base_labels)
+    imp = {}
+    for col in X.columns:
+        scores = []
+        for _ in range(PERMUTE_ROUNDS):
+            X_perm = X.copy()
+            X_perm[col] = np.random.permutation(X_perm[col].values)
+            labels_perm = clusterer.fit_predict(X_perm)
+            scores.append(baseline - metric_func(X_perm, labels_perm))
+        imp[col] = np.mean(scores)
+    return pd.Series(imp).sort_values(ascending=False)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5 · Kümeleme yardımcıları
+# 5 · Kümeleme ve Analiz
 # ─────────────────────────────────────────────────────────────────────────────
 
-def choose_k(X: pd.DataFrame, rng=range(2, 9)) -> int:
-    best_k, best_s = 2, -1
-    for k in rng:
-        labels = KMeans(k, n_init=10, random_state=42).fit_predict(X)
-        sc = silhouette_score(X, labels)
-        if sc > best_s:
-            best_k, best_s = k, sc
-    return best_k
-
-
-def assign_risk(summary: pd.DataFrame) -> Dict[int, str]:
-    rank = summary.rank(pct=True).mean(axis=1)
-    idx = rank.sort_values().index.tolist()
-    mapping: Dict[int, str] = {}
-    if len(idx) == 1:
-        mapping[idx[0]] = "Mid-Risk"
-    elif len(idx) == 2:
-        mapping[idx[0]], mapping[idx[1]] = "High-Risk", "Low-Risk"
-    else:
-        mapping[idx[0]], mapping[idx[-1]] = "High-Risk", "Low-Risk"
-        for i in idx[1:-1]: mapping[i] = "Mid-Risk"
-    return mapping
-
-
-def cluster_and_profile(df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
+def cluster_and_analyze(df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
     X = df[features].astype(float)
-    k_opt = choose_k(X)
-    algos_k = {
-        "kmeans": KMeans(k_opt, n_init=10, random_state=42),
-        "spectral": SpectralClustering(k_opt, assign_labels="kmeans", random_state=42),
-        "gmm": GaussianMixture(n_components=k_opt, random_state=42),
-        "agg": AgglomerativeClustering(n_clusters=k_opt, linkage="ward"),
-    }
-    for name, m in algos_k.items():
-        df[f"{name}_id"] = m.fit_predict(X)
-        summ = df.groupby(f"{name}_id")[features].median()
-        df[f"{name}_risk"] = df[f"{name}_id"].map(assign_risk(summ))
+    results = {}
 
-    density = {
-        "dbscan": DBSCAN(eps=0.8, min_samples=10),
-        "optics": OPTICS(min_samples=10, xi=0.05, min_cluster_size=0.02),
+    # Kullanılacak algoritmalar
+    algos = {
+        "KMeans": KMeans(n_clusters=N_CLUSTERS, random_state=42),
+        "Spectral": SpectralClustering(n_clusters=N_CLUSTERS, assign_labels="kmeans", random_state=42),
+        "Agglomerative": AgglomerativeClustering(n_clusters=N_CLUSTERS, linkage="ward"),
+        "DBSCAN": DBSCAN(eps=0.8, min_samples=10),
+        "OPTICS": OPTICS(min_samples=10, xi=0.05, min_cluster_size=0.02)
     }
-    for name, m in density.items():
-        labels = m.fit_predict(X)
+
+    for name, model in algos.items():
+        labels = model.fit_predict(X)
         df[f"{name}_id"] = labels
-        mask = labels != -1
-        if mask.any():
-            summ = df[mask].groupby(f"{name}_id")[features].median()
-            mapper = assign_risk(summ)
-            df[f"{name}_risk"] = df[f"{name}_id"].map(mapper)
-            df.loc[~mask, f"{name}_risk"] = "Noise"
-        else:
-            df[f"{name}_risk"] = "Noise"
+        # Metric: silhouette sadece etiketli kümeler
+        sil = silhouette_score(X, labels) if len(set(labels))>1 else np.nan
+        print(f"{name} silhouette: {sil:.3f}")
+        # Feature importance
+        imp = permutation_importance(X, labels, model, silhouette_score)
+        top_feat = imp.head(10)
+        print(f"{name} top features:\n", top_feat)
+        # Görsel
+        top_feat.plot(kind='bar', title=f"{name} Permutation Importance")
+        plt.tight_layout(); plt.show()
+
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6 · Görselleştirme
-# ─────────────────────────────────────────────────────────────────────────────
-
-def visualize_counts(df: pd.DataFrame, cluster_col: str, risk_col: str, title: str):
-    fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-    sns.countplot(x=df[cluster_col], ax=ax[0]); ax[0].set_title(f"{title} Clusters")
-    sns.countplot(x=df[risk_col], order=["Low-Risk","Mid-Risk","High-Risk","Noise"], ax=ax[1]); ax[1].set_title(f"{title} Risk")
-    plt.tight_layout(); plt.show()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7 · Pipeline
+# 6 · Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
 def pipeline():
@@ -217,25 +198,11 @@ def pipeline():
     df = feature_engineering(df)
     num_cols = df.select_dtypes(include="number").columns.tolist()
     df = scale_numeric(df, num_cols)
-    df_pca, pca = pca_reduce(df[num_cols], var_ratio=VAR_RATIO, n_components=N_COMPONENTS)
-    df_full = pd.concat([df, df_pca], axis=1)
-    df_full = cluster_and_profile(df_full, df_pca.columns.tolist())
-
-    # Görseller
-    visualize_counts(df_full, "kmeans_id", "kmeans_risk", "KMeans (PCA)")
-    visualize_counts(df_full, "spectral_id", "spectral_risk", "Spectral (PCA)")
-    visualize_counts(df_full, "dbscan_id", "dbscan_risk", "DBSCAN (PCA)")
-    visualize_counts(df_full, "optics_id", "optics_risk", "OPTICS (PCA)")
-
-    # PCA varyans eğrisi
-    plt.figure(figsize=(6, 3))
-    plt.plot(np.cumsum(pca.explained_variance_ratio_)); plt.xlabel("Bileşen"); plt.ylabel("Kümülatif Varyans"); plt.title("PCA Variance")
-    plt.tight_layout(); plt.show()
-
-    save_data(df_full, CSV_OUT)
+    df = cluster_and_analyze(df, num_cols)
+    save_data(df, CSV_OUT)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8 · Çalıştır
+# Çalıştır
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
