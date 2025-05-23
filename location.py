@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import List
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import silhouette_score
+import optuna
+
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -21,69 +25,80 @@ CSV_OUT: str = "risk_score.csv"   # Çıktı CSV yolunu ayarla
 # 1 · Feature Grupları & Öncelikler
 # ---------------------------------------------------------------------------
 GROUPS: dict[str, dict] = {
-    "Gelir & Harcama": {
-        "priority": 5,
-        "features": [
-            "Aylık Ortalama Hane Geliri",
-            "tasarruf_oran",               # Aylık Tasarruf / Gelir
-            "Bireysel Kredi / Gelir",      # önceden hazırlanmış oran kolonu olmalı
-            "Toplam Mevduat / Gelir",      # önceden hazırlanmış oran kolonu olmalı
-            "gelir_kira_yuku",
-            "Toplam Harcama",
-        ],
-    },
-    "Kredi & Bankacılık": {
-        "priority": 5,
-        "features": ["Kullanılan Toplam Kredi (BinTL)", "kart_kisi_oran"],
-    },
-    "Coğrafi & Afet": {
-        "priority": 3,
-        "features": ["Deprem Puan", "Bölge Riski"],
-    },
-    "Eğitim": {
-        "priority": 4,
-        "features": [
-            "Ortalama Eğitim Süresi (Yıl)",
-            "lisansüstü_oran",
-            "üniversite_oran",
-            "ilkokul_oran",
-            "ilköğretim_oran",
-            "okumamış_oran",
-            "okuryazar_oran",
-        ],
-    },
-    "Tüketim & SES": {
-        "priority": 5,
-        "features": [
-            "Tüketim Potansiyeli (Yüzde %)",
-            "Ortalama SES",
-            "Gelişmişlik Katsayısı",
-            "AB Oran",
-            "DE Oran",
-        ],
-    },
-    "Demografi": {
-        "priority": 3,
-        "features": [
-            "Ortalama Hanehalkı",
-            "çocuk_oran",
-            "genç_oran",
-            "orta_yas_oran",
-            "yaslı_oran",
-            "bekar_oran",
-            "evli_oran",
-        ],
-    },
+    "Gelir & Harcama": {"priority": 5, "features": [
+        "Aylık Ortalama Hane Geliri", "tasarruf_oran", "Bireysel Kredi / Gelir", 
+        "Toplam Mevduat / Gelir", "gelir_kira_yuku", "Toplam Harcama"
+    ]},
+    "Kredi & Bankacılık": {"priority": 5, "features": [
+        "Kullanılan Toplam Kredi (BinTL)", "kart_kisi_oran"
+    ]},
+    "Coğrafi & Afet": {"priority": 3, "features": ["Deprem Puan", "Bölge Riski"]},
+    "Eğitim": {"priority": 4, "features": [
+        "Ortalama Eğitim Süresi (Yıl)", "lisansüstü_oran", "üniversite_oran", 
+        "ilkokul_oran", "ilköğretim_oran", "okumamış_oran", "okuryazar_oran"
+    ]},
+    "Tüketim & SES": {"priority": 5, "features": [
+        "Tüketim Potansiyeli (Yüzde %)", "Ortalama SES", "Gelişmişlik Katsayısı", 
+        "AB Oran", "DE Oran"
+    ]},
+    "Demografi": {"priority": 3, "features": [
+        "Ortalama Hanehalkı", "çocuk_oran", "genç_oran", 
+        "orta_yas_oran", "yaslı_oran", "bekar_oran", "evli_oran"
+    ]},
     "Çalışma": {"priority": 3, "features": ["Çalışan Oran"]},
-    "Altyapı": {
-        "priority": 3,
-        "features": [
-            "konut_yogunlugu",
-            "Ortalama Kira Değerleri",
-            "Alan Büyüklüğü / km2",
-        ],
-    },
+    "Altyapı": {"priority": 3, "features": [
+        "konut_yogunlugu", "Ortalama Kira Değerleri", "Alan Büyüklüğü / km2"
+    ]},
     "Varlık": {"priority": 2, "features": ["Hane Başı Araç Sahipliği"]},
+}
+
+# ---------------------------------------------------------------------------
+# 2 · Yön Bilgisi ('pos' = artınca risk artar, 'neg' = artınca risk azalır)
+# ---------------------------------------------------------------------------
+DIRECTIONS: dict[str,str] = {
+    # Gelir & Harcama
+    "Aylık Ortalama Hane Geliri": "neg",
+    "tasarruf_oran": "neg",
+    "Bireysel Kredi / Gelir": "pos",
+    "Toplam Mevduat / Gelir": "neg",
+    "gelir_kira_yuku": "pos",
+    "Toplam Harcama": "pos",
+    # Kredi & Bankacılık
+    "Kullanılan Toplam Kredi (BinTL)": "pos",
+    "kart_kisi_oran": "pos",
+    # Coğrafi & Afet
+    "Deprem Puan": "pos",
+    "Bölge Riski": "pos",
+    # Eğitim
+    "Ortalama Eğitim Süresi (Yıl)": "neg",
+    "lisansüstü_oran": "neg",
+    "üniversite_oran": "neg",
+    "ilkokul_oran": "pos",
+    "ilköğretim_oran": "pos",
+    "okumamış_oran": "pos",
+    "okuryazar_oran": "neg",
+    # Tüketim & SES
+    "Tüketim Potansiyeli (Yüzde %)": "pos",
+    "Ortalama SES": "neg",
+    "Gelişmişlik Katsayısı": "neg",
+    "AB Oran": "neg",
+    "DE Oran": "pos",
+    # Demografi
+    "Ortalama Hanehalkı": "pos",
+    "çocuk_oran": "pos",
+    "genç_oran": "pos",
+    "orta_yas_oran": "neg",
+    "yaslı_oran": "pos",
+    "bekar_oran": "pos",
+    "evli_oran": "neg",
+    # Çalışma
+    "Çalışan Oran": "neg",
+    # Altyapı
+    "konut_yogunlugu": "pos",
+    "Ortalama Kira Değerleri": "pos",
+    "Alan Büyüklüğü / km2": "neg",
+    # Varlık
+    "Hane Başı Araç Sahipliği": "neg",
 }
 
 
@@ -183,7 +198,7 @@ def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------------------------------------------------------------
-# 3 · Ölçekleme & Ağırlıklar
+# 4 · Ölçekleme & İnvert Yön
 # ---------------------------------------------------------------------------
 
 def robust_scale(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -193,39 +208,74 @@ def robust_scale(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df
 
 
+def apply_directions(df: pd.DataFrame, dirs: dict[str,str]) -> pd.DataFrame:
+    for feat, dir in dirs.items():
+        if dir == 'neg':
+            df[feat] = 1 - df[feat]
+    return df
+
+# ---------------------------------------------------------------------------
+# 5 · Ağırlıklar
+# ---------------------------------------------------------------------------
+
 def compute_weights() -> dict[str,float]:
-    w:dict[str,float]={}
+    w: dict[str,float] = {}
     for grp,meta in GROUPS.items():
-        weight = meta["priority"]/len(meta["features"])
-        for feat in meta["features"]:
+        weight = meta['priority']/len(meta['features'])
+        for feat in meta['features']:
             w[feat] = weight
     return w
 
-
-def weighted_risk(df: pd.DataFrame,w:dict[str,float]) -> pd.Series:
-    total = sum(w.values())
-    return 100*df[list(w)].mul(pd.Series(w)).sum(axis=1)/total
-
 # ---------------------------------------------------------------------------
-# 4 · Pipeline
+# 6 · Risk Skoru Hesaplama & Optimizasyon
 # ---------------------------------------------------------------------------
 
-def pipeline():
-    df=load_data(CSV_IN)
-    df=feature_engineering(df)
+def weighted_risk(df: pd.DataFrame, weights: dict[str,float]) -> pd.Series:
+    total = sum(weights.values())
+    return 100 * df[list(weights)].mul(pd.Series(weights)).sum(axis=1) / total
 
-    core=[f for grp in GROUPS.values() for f in grp["features"]]
-    miss=[c for c in core if c not in df.columns]
-    if miss: raise ValueError(f"Eksik kolonlar: {miss}")
 
-    df=robust_scale(df,core)
-    w=compute_weights()
-    df["Risk_Skoru"]=weighted_risk(df,w)
-    df["Risk_Sınıfı"]=pd.cut(df["Risk_Skoru"],bins=[-np.inf,35,65,np.inf],labels=["Low-Risk","Mid-Risk","High-Risk"])
+def optimize_weights(df: pd.DataFrame, features: List[str], n_trials: int = 50) -> dict[str,float]:
+    def objective(trial):
+        w = {feat: trial.suggest_float(feat, 0, 5) for feat in features}
+        score = df[features].mul(pd.Series(w)).sum(axis=1)
+        labels = pd.qcut(score, 3, labels=False, duplicates='drop')
+        try:
+            return silhouette_score(df[features], labels)
+        except:
+            return -1
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=n_trials)
+    return study.best_params
 
-    Path(CSV_OUT).parent.mkdir(exist_ok=True,parents=True)
+# ---------------------------------------------------------------------------
+# 7 · Pipeline
+# ---------------------------------------------------------------------------
+
+def pipeline(use_optuna: bool = False):
+    df = load_data(CSV_IN)
+    df = feature_engineering(df)
+
+    core = [f for grp in GROUPS.values() for f in grp['features']]
+    missing = [c for c in core if c not in df.columns]
+    if missing:
+        raise ValueError(f'Missing features: {missing}')
+
+    df = robust_scale(df, core)
+    df = apply_directions(df, DIRECTIONS)
+
+    if use_optuna:
+        print('Optimizing weights...')
+        weights = optimize_weights(df, core)
+    else:
+        weights = compute_weights()
+
+    df['Risk_Skoru'] = weighted_risk(df, weights)
+    df['Risk_Sınıfı'] = pd.cut(df['Risk_Skoru'], bins=[-np.inf,35,65,np.inf], labels=['Low-Risk','Mid-Risk','High-Risk'])
+
+    Path(CSV_OUT).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(CSV_OUT)
-    print(f"✔ Risk skorları kaydedildi → {CSV_OUT}")
+    print(f'✔ Risk skorları kaydedildi → {CSV_OUT}')
 
-if __name__=="__main__":
-    pipeline()
+if __name__ == '__main__':
+    pipeline(use_optuna=False)
