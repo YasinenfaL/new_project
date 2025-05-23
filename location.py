@@ -1,17 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
-
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.cluster import (
-    KMeans, SpectralClustering, AgglomerativeClustering, DBSCAN, OPTICS
-)
-from sklearn.metrics import silhouette_score
-from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import RobustScaler
 
 import warnings
@@ -22,13 +13,78 @@ warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sabitler – ihtiyaca göre güncelle
-# ─────────────────────────────────────────────────────────────────────────────
 CSV_IN: str = "data.csv"              # Girdi CSV yolunu ayarla
-CSV_OUT: str = "risk_segmented.csv"   # Çıktı CSV yolunu ayarla
-N_CLUSTERS = 4      # Küme sayısı (PCA kaldırıldı, doğrudan özelliklerle)
-PERMUTE_ROUNDS = 10 # Her özellik için permutation tekrarı
+CSV_OUT: str = "risk_score.csv"   # Çıktı CSV yolunu ayarla
+
+
+# ---------------------------------------------------------------------------
+# 1 · Feature Grupları & Öncelikler
+# ---------------------------------------------------------------------------
+GROUPS: dict[str, dict] = {
+    "Gelir & Harcama": {
+        "priority": 5,
+        "features": [
+            "Aylık Ortalama Hane Geliri",
+            "tasarruf_oran",               # Aylık Tasarruf / Gelir
+            "Bireysel Kredi / Gelir",      # önceden hazırlanmış oran kolonu olmalı
+            "Toplam Mevduat / Gelir",      # önceden hazırlanmış oran kolonu olmalı
+            "gelir_kira_yuku",
+            "Toplam Harcama",
+        ],
+    },
+    "Kredi & Bankacılık": {
+        "priority": 5,
+        "features": ["Kullanılan Toplam Kredi (BinTL)", "kart_kisi_oran"],
+    },
+    "Coğrafi & Afet": {
+        "priority": 3,
+        "features": ["Deprem Puan", "Bölge Riski"],
+    },
+    "Eğitim": {
+        "priority": 4,
+        "features": [
+            "Ortalama Eğitim Süresi (Yıl)",
+            "lisansüstü_oran",
+            "üniversite_oran",
+            "ilkokul_oran",
+            "ilköğretim_oran",
+            "okumamış_oran",
+            "okuryazar_oran",
+        ],
+    },
+    "Tüketim & SES": {
+        "priority": 5,
+        "features": [
+            "Tüketim Potansiyeli (Yüzde %)",
+            "Ortalama SES",
+            "Gelişmişlik Katsayısı",
+            "AB Oran",
+            "DE Oran",
+        ],
+    },
+    "Demografi": {
+        "priority": 3,
+        "features": [
+            "Ortalama Hanehalkı",
+            "çocuk_oran",
+            "genç_oran",
+            "orta_yas_oran",
+            "yaslı_oran",
+            "bekar_oran",
+            "evli_oran",
+        ],
+    },
+    "Çalışma": {"priority": 3, "features": ["Çalışan Oran"]},
+    "Altyapı": {
+        "priority": 3,
+        "features": [
+            "konut_yogunlugu",
+            "Ortalama Kira Değerleri",
+            "Alan Büyüklüğü / km2",
+        ],
+    },
+    "Varlık": {"priority": 2, "features": ["Hane Başı Araç Sahipliği"]},
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,76 +182,50 @@ def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3.  Ölçekleme
-# ─────────────────────────────────────────────────────────────────────────────
-def scale_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# 3 · Ölçekleme & Ağırlıklar
+# ---------------------------------------------------------------------------
+
+def robust_scale(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     scaler = RobustScaler()
     df[cols] = scaler.fit_transform(df[cols])
+    df[cols] = (df[cols]-df[cols].min())/(df[cols].max()-df[cols].min())
     return df
 
-# ────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. Optimum K Seçimi (Elbow + ikinci türev)
-# ─────────────────────────────────────────────────────────────────────────────
-def auto_choose_k(X: pd.DataFrame, k_range: range) -> int:
-    inertias = []
-    for k in k_range:
-        km = KMeans(n_clusters=k, random_state=42)
-        km.fit(X)
-        inertias.append(km.inertia_)
-    # İterias farkları
-    diffs = np.diff(inertias)
-    # İkinci türev (farkların farkı)
-    second_diffs = np.diff(diffs)
-    # En büyük mutlak ikinci türev noktası seçilir
-    elbow_idx = np.argmax(np.abs(second_diffs)) + 2  # +2: ikinci türev listesi k=2 için index 0
-    chosen_k = list(k_range)[elbow_idx]
-    # Elbow grafiğini de görselleştir
-    plt.figure()
-    plt.plot(list(k_range), inertias, marker='o')
-    plt.axvline(chosen_k, color='red', linestyle='--', label=f'Selected k={chosen_k}')
-    plt.title('Elbow Method with Auto-Detect')
-    plt.xlabel('Küme Sayısı (k)')
-    plt.ylabel('Inertia')
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-    print(f"Otomatik seçilen küme sayısı: {chosen_k}")
-    return chosen_k
+def compute_weights() -> dict[str,float]:
+    w:dict[str,float]={}
+    for grp,meta in GROUPS.items():
+        weight = meta["priority"]/len(meta["features"])
+        for feat in meta["features"]:
+            w[feat] = weight
+    return w
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. Kümeleme ve Analiz (Sadece KMeans)
-# ─────────────────────────────────────────────────────────────────────────────
 
-RANGE_K = range(2, 11) 
-def cluster_and_analyze(df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
-    X = df[features].astype(float)
-    # Otomatik k belirle
-    k = auto_choose_k(X, RANGE_K)
-    # KMeans
-    km = KMeans(n_clusters=k, random_state=42)
-    labels = km.fit_predict(X)
-    df['KMeans_id'] = labels
-    # Silhouette skoru
-    sil = silhouette_score(X, labels)
-    print(f"KMeans silhouette: {sil:.3f}")
-    return df
+def weighted_risk(df: pd.DataFrame,w:dict[str,float]) -> pd.Series:
+    total = sum(w.values())
+    return 100*df[list(w)].mul(pd.Series(w)).sum(axis=1)/total
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. Pipeline
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# 4 · Pipeline
+# ---------------------------------------------------------------------------
+
 def pipeline():
-    df = load_data(CSV_IN)
-    df = feature_engineering(df)
-    num_cols = df.select_dtypes(include="number").columns.tolist()
-    df = scale_numeric(df, num_cols)
-    df = cluster_and_analyze(df, num_cols)
-    save_data(df, CSV_OUT)
+    df=load_data(CSV_IN)
+    df=feature_engineering(df)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Çalıştır
-# ─────────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+    core=[f for grp in GROUPS.values() for f in grp["features"]]
+    miss=[c for c in core if c not in df.columns]
+    if miss: raise ValueError(f"Eksik kolonlar: {miss}")
+
+    df=robust_scale(df,core)
+    w=compute_weights()
+    df["Risk_Skoru"]=weighted_risk(df,w)
+    df["Risk_Sınıfı"]=pd.cut(df["Risk_Skoru"],bins=[-np.inf,35,65,np.inf],labels=["Low-Risk","Mid-Risk","High-Risk"])
+
+    Path(CSV_OUT).parent.mkdir(exist_ok=True,parents=True)
+    df.to_csv(CSV_OUT)
+    print(f"✔ Risk skorları kaydedildi → {CSV_OUT}")
+
+if __name__=="__main__":
     pipeline()
