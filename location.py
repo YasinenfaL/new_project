@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Dict, List, Optional
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,12 +10,9 @@ import seaborn as sns
 from sklearn.cluster import (
     KMeans, SpectralClustering, AgglomerativeClustering, DBSCAN, OPTICS
 )
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.metrics import silhouette_score
+from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import RobustScaler
-from sklearn.manifold import TSNE
-
-import warnings
-warnings.filterwarnings('ignore')
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -127,68 +127,64 @@ def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ölçekleme
+# 3.  Ölçekleme
 # ─────────────────────────────────────────────────────────────────────────────
-def scale_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+def scale_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     scaler = RobustScaler()
     df[cols] = scaler.fit_transform(df[cols])
     return df
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Risk Ataması
-# ─────────────────────────────────────────────────────────────────────────────
-def assign_risk(df: pd.DataFrame, cluster_col: str, features: list[str]) -> pd.Series:
-    summary = df.groupby(cluster_col)[features].median().mean(axis=1)
-    order = summary.sort_values().index
-    risk_labels = ["High-Risk", "Mid-Risk", "Low-Risk"]
-    risk_map = {cluster: risk_labels[min(i, 2)] for i, cluster in enumerate(order)}
-    return df[cluster_col].map(risk_map)
+# ────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
-# t-SNE Görselleştirme
+# 4. Optimum K Seçimi (Elbow + ikinci türev)
 # ─────────────────────────────────────────────────────────────────────────────
-def plot_tsne(X: pd.DataFrame, labels, title: str):
-    tsne = TSNE(n_components=2, random_state=42)
-    X_emb = tsne.fit_transform(X)
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(x=X_emb[:, 0], y=X_emb[:, 1], hue=labels, palette='tab10')
-    plt.title(title)
+def auto_choose_k(X: pd.DataFrame, k_range: range) -> int:
+    inertias = []
+    for k in k_range:
+        km = KMeans(n_clusters=k, random_state=42)
+        km.fit(X)
+        inertias.append(km.inertia_)
+    # İterias farkları
+    diffs = np.diff(inertias)
+    # İkinci türev (farkların farkı)
+    second_diffs = np.diff(diffs)
+    # En büyük mutlak ikinci türev noktası seçilir
+    elbow_idx = np.argmax(np.abs(second_diffs)) + 2  # +2: ikinci türev listesi k=2 için index 0
+    chosen_k = list(k_range)[elbow_idx]
+    # Elbow grafiğini de görselleştir
+    plt.figure()
+    plt.plot(list(k_range), inertias, marker='o')
+    plt.axvline(chosen_k, color='red', linestyle='--', label=f'Selected k={chosen_k}')
+    plt.title('Elbow Method with Auto-Detect')
+    plt.xlabel('Küme Sayısı (k)')
+    plt.ylabel('Inertia')
+    plt.legend()
+    plt.tight_layout()
     plt.show()
+    print(f"Otomatik seçilen küme sayısı: {chosen_k}")
+    return chosen_k
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Kümeleme & Analiz
+# 5. Kümeleme ve Analiz (Sadece KMeans)
 # ─────────────────────────────────────────────────────────────────────────────
-def cluster_and_analyze(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+
+RANGE_K = range(2, 11) 
+def cluster_and_analyze(df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
     X = df[features].astype(float)
-
-    algos = {
-        "KMeans": KMeans(n_clusters=N_CLUSTERS, random_state=42),
-        "Spectral": SpectralClustering(n_clusters=N_CLUSTERS, random_state=42),
-        "Agglomerative": AgglomerativeClustering(n_clusters=N_CLUSTERS),
-        "DBSCAN": DBSCAN(eps=0.8, min_samples=10),
-        "OPTICS": OPTICS(min_samples=10)
-    }
-
-    for name, model in algos.items():
-        labels = model.fit_predict(X)
-        df[f"{name}_id"] = labels
-
-        if len(set(labels)) > 1:
-            sil = silhouette_score(X, labels)
-            calinski = calinski_harabasz_score(X, labels)
-            davies = davies_bouldin_score(X, labels)
-            print(f"{name} | Silhouette: {sil:.3f}, Calinski: {calinski:.1f}, Davies-Bouldin: {davies:.3f}")
-        else:
-            print(f"{name}: Tek küme bulundu.")
-
-        df[f"{name}_risk"] = assign_risk(df, f"{name}_id", features)
-
-        plot_tsne(X, labels, title=f"{name} t-SNE Görselleştirme")
-
+    # Otomatik k belirle
+    k = auto_choose_k(X, RANGE_K)
+    # KMeans
+    km = KMeans(n_clusters=k, random_state=42)
+    labels = km.fit_predict(X)
+    df['KMeans_id'] = labels
+    # Silhouette skoru
+    sil = silhouette_score(X, labels)
+    print(f"KMeans silhouette: {sil:.3f}")
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pipeline
+# 6. Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 def pipeline():
     df = load_data(CSV_IN)
@@ -199,7 +195,7 @@ def pipeline():
     save_data(df, CSV_OUT)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main
+# Çalıştır
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     pipeline()
