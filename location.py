@@ -33,8 +33,38 @@ warnings.filterwarnings("ignore")
 
 # 0 · Config
 GROUPS: dict[str, dict] = { ... }  # (Aynı GROUPS tanımı yukarıdaki gibi)
-DIRECTIONS: dict[str, str] = { ... }  # (Aynı DIRECTIONS)
-COMPOSITES: dict[str, List[str]] = { ... }  # (Aynı COMPOSITES)
+DIRECTIONS: Dict[str, str] = {
+    **{feat: 'pos' for feat in [
+        "Bireysel Kredi / Gelir","gelir_kira_yuku","Toplam Harcama",
+        "Kullanılan Toplam Kredi (BinTL)","kart_kisi_oran",
+        "Deprem Puan","Bölge Riski",
+        "ilkokul_oran","ilköğretim_oran","okumamış_oran", 
+        "Tüketim Potansiyeli (Yüzde %)","DE Oran",
+        "Ortalama Hanehalkı","çocuk_oran","genç_oran",
+        "yaslı_oran","bekar_oran",
+        "konut_yogunlugu","Ortalama Kira Değerleri"
+    ]},
+    **{feat: 'neg' for feat in [
+        "Aylık Ortalama Hane Geliri","tasarruf_oran",
+        "Toplam Mevduat / Gelir","Ortalama Eğitim Süresi (Yıl)",
+        "lisansüstü_oran","üniversite_oran","okuryazar_oran",
+        "Ortalama SES","Gelişmişlik Katsayısı","AB Oran", 
+        "orta_yas_oran","evli_oran","Alan Büyüklüğü / km2",
+        "Hane Başı Araç Sahipliği"
+    ]}
+}
+
+COMPOSITES: Dict[str, List[str]] = {
+    "economic_resilience": [
+        "Gelir & Harcama","Çalışma","Varlık"
+    ],
+    "financial_leverage": [
+        "Kredi & Bankacılık"
+    ],
+    "socio_demo_vulnerability": [
+        "Demografi","Eğitim","Tüketim & SES","Altyapı","Coğrafi & Afet"
+    ]
+}
 
 # 1 · Yardımcı Fonksiyonlar
 
@@ -93,8 +123,6 @@ def run_pipeline(
     # Per-capita normalization
     df = df.assign(**{col+'_per1k': df[col]/(df['Toplam Nüfus']/1000+1)
                        for col in df.columns if 'Sayısı' in col or 'Nüfus' in col})
-    # Feature engineering dışarıdan çağırılmalı
-    from risk_score_feature_eng import feature_engineering
     df = feature_engineering(df)
 
     FEATURES = [f for g in GROUPS.values() for f in g['features']]
