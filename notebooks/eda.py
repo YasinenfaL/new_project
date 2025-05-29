@@ -1,203 +1,150 @@
-Aşağıda tüm parçaları (dosya yükleme, GROUPS, DIRECTIONS, ölçekleme, yön düzeltme, entropi tabanlı ağırlık, log-multiplikatif risk skoru ve quantile segmentasyon) bir arada görebileceğiniz, çalıştırmaya hazır bir Python betiği var. Kendi yolunuza göre --csv_in / --csv_out argümanlarını verip kullanabilirsiniz.
-
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-risk_segmentation_full.py
+risk_segmentation_custom_loader.py
+
+1. Excel'den veri yükler (input_path),
+   - İl, İlçe, Mahalle sütunlarını 'Lokasyon' indexine dönüştürür,
+   - Nüfusu 500'ün altındaki satırları atar.
+2. GROUPS içindeki feature'ları filtreler ve eksik verileri çıkarır.
+3. MinMax ölçekleme + neg/pos yön düzeltmesi.
+4. Entropi tabanlı ağırlık hesaplar.
+5. Log-multiplikatif risk skoru üretir ve [0-100] aralığına normlar.
+6. Quantile segment ataması yapar.
+7. Sonucu CSV'ye yazar, ağırlıkları terminale basar.
 
 Kullanım:
-    python risk_segmentation_full.py \
-        --input lokasyon_data.csv \
-        --output results.csv
+    python risk_segmentation_custom_loader.py --input veri.xlsx --output results.csv
 """
 
 import argparse
-import warnings
+import sys
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from scipy.stats import entropy as shannon_entropy
 
-warnings.filterwarnings("ignore")
 EPS = 1e-6
 
+# 1. Veri Yükleme
 # --------------------------------------------------------------------
-# 1 · Dosya Okuma (CSV ya da Excel otomatik seçer)
-# --------------------------------------------------------------------
-def load_data(path: str) -> pd.DataFrame:
-    try:
-        return pd.read_csv(path, index_col="Lokasyon")
-    except Exception:
-        return pd.read_excel(path, engine="openpyxl", index_col="Lokasyon")
+def load_data(input_path: str) -> pd.DataFrame:
+    # Excel okuma
+    df = pd.read_excel(input_path)
+    # Lokasyon oluşturma
+    df["Lokasyon"] = (
+        df["İl Adı"].astype(str) + "-" +
+        df["İlçe Adı"].astype(str) + "_" +
+        df["Mahalle Adı"].astype(str)
+    )
+    df.drop(columns=["İl Adı", "İlçe Adı", "Mahalle Adı"], inplace=True)
+    df.set_index("Lokasyon", inplace=True)
+    # Minimum nüfus filtresi
+    if "Toplam Nüfus" in df.columns:
+        df = df[df["Toplam Nüfus"] >= 500]
+    return df
 
-# --------------------------------------------------------------------
-# 2 · Feature Grupları & Yön Bilgileri
+# 2. Gruplar & Yön Bilgileri
 # --------------------------------------------------------------------
 GROUPS = {
-    "Gelir & Harcama": {"priority": 5, "features": [
+    "Gelir & Harcama": {"features": [
         "Aylık Ortalama Hane Geliri", "tasarruf_oran", "Bireysel Kredi / Gelir",
         "Toplam Mevduat / Gelir", "gelir_kira_yuku", "Toplam Harcama",
         "Max_Min_Income_Ratio", "Income_Gini_Proxy"
     ]},
-    "Kredi & Bankacılık": {"priority": 3, "features": [
-        "Kullanılan Toplam Kredi (BinTL)", "kart_kisi_oran"
-    ]},
-    "Coğrafi & Afet": {"priority": 4, "features": [
-        "Deprem Puan", "Bölge Riski"
-    ]},
-    "Eğitim": {"priority": 5, "features": [
+    "Kredi & Bankacılık": {"features": ["Kullanılan Toplam Kredi (BinTL)", "kart_kisi_oran"]},
+    "Coğrafi & Afet": {"features": ["Deprem Puan", "Bölge Riski"]},
+    "Eğitim": {"features": [
         "Ortalama Eğitim Süresi (Yıl)", "lisansüstü_oran", "üniversite_oran",
-        "ilkokul_oran", "ilköğretim_oran", "okumamış_oran", "okuryazar_oran"
+        "ilkokul_oran", "ilköğretim_oran", "okunmamış_oran", "okuryazar_oran"
     ]},
-    "Tüketim & SES": {"priority": 5, "features": [
+    "Tüketim & SES": {"features": [
         "Tüketim Potansiyeli (Yüzde %)", "Ortalama SES", "Gelişmişlik Katsayısı",
         "AB Oran", "DE Oran"
     ]},
-    "Demografi": {"priority": 5, "features": [
+    "Demografi": {"features": [
         "Ortalama Hanehalkı", "çocuk_oran", "genç_oran", "orta_yas_oran",
-        "yaslı_oran", "bekar_oran", "evli_oran", "Working_Age_Share",
-        "Dependency_Ratio"
+        "yaslı_oran", "bekar_oran", "evli_oran", "Working_Age_Share", "Dependency_Ratio"
     ]},
-    "Çalışma": {"priority": 5, "features": [
-        "Çalışan Oranı"
-    ]},
-    "Altyapı": {"priority": 5, "features": [
+    "Çalışma": {"features": ["Çalışan Oranı"]},
+    "Altyapı": {"features": [
         "Konut Yoğunluğu (Konut/Km2)", "Ortalama Kira Değerleri",
         "Alan Büyüklüğü / km2", "Population_Density"
     ]},
-    "Varlık": {"priority": 4, "features": [
-        "Hane Başı Araç Sahipliği"
-    ]},
+    "Varlık": {"features": ["Hane Başı Araç Sahipliği"]}
 }
 
-DIRECTIONS = {
-    # "neg" = yüksekçe düştükçe risk artar → ölçek sonrası 1-x
-    # "pos" = yükseldikçe risk artar → ölçek sonrası direkt kullan
-    "Aylık Ortalama Hane Geliri": "neg",
-    "tasarruf_oran":               "neg",
-    "Bireysel Kredi / Gelir":      "pos",
-    "Toplam Mevduat / Gelir":      "neg",
-    "gelir_kira_yuku":             "pos",
-    "Toplam Harcama":              "pos",
-    "Max_Min_Income_Ratio":        "pos",
-    "Income_Gini_Proxy":           "pos",
-    "Kullanılan Toplam Kredi (BinTL)": "pos",
-    "kart_kisi_oran":              "pos",
-    "Deprem Puan":                 "pos",
-    "Bölge Riski":                 "pos",
-    "Ortalama Eğitim Süresi (Yıl)": "neg",
-    "lisansüstü_oran":             "neg",
-    "üniversite_oran":             "neg",
-    "ilkokul_oran":                "pos",
-    "ilköğretim_oran":             "pos",
-    "okumamış_oran":               "pos",
-    "okuryazar_oran":              "neg",
-    "Tüketim Potansiyeli (Yüzde %)": "pos",
-    "Ortalama SES":                "neg",
-    "Gelişmişlik Katsayısı":       "neg",
-    "AB Oran":                     "neg",
-    "DE Oran":                     "pos",
-    "Ortalama Hanehalkı":          "pos",
-    "çocuk_oran":                  "pos",
-    "genç_oran":                   "pos",
-    "orta_yas_oran":               "pos",
-    "yaslı_oran":                  "pos",
-    "bekar_oran":                  "pos",
-    "evli_oran":                   "neg",
-    "Working_Age_Share":           "neg",
-    "Dependency_Ratio":            "pos",
-    "Çalışan Oranı":               "neg",
-    "Konut Yoğunluğu (Konut/Km2)": "pos",
-    "Ortalama Kira Değerleri":     "pos",
-    "Alan Büyüklüğü / km2":        "neg",
-    "Population_Density":          "pos",
-    "Hane Başı Araç Sahipliği":    "neg",
-}
+# neg/pos yön
+DIRECTIONS = {**{f: "neg" for f in [
+    "Aylık Ortalama Hane Geliri","tasarruf_oran","Toplam Mevduat / Gelir",
+    "Ortalama Eğitim Süresi (Yıl)","lisansüstü_oran","üniversite_oran",
+    "okuryazar_oran","Ortalama SES","Gelişmişlik Katsayısı",
+    "AB Oran","evli_oran","Working_Age_Share","Çalışan Oranı",
+    "Alan Büyüklüğü / km2","Hane Başı Araç Sahipliği"
+]]},
+               **{f: "pos" for f in [
+    "Bireysel Kredi / Gelir","gelir_kira_yuku","Toplam Harcama",
+    "Max_Min_Income_Ratio","Income_Gini_Proxy","Kullanılan Toplam Kredi (BinTL)",
+    "kart_kisi_oran","Deprem Puan","Bölge Riski","ilkokul_oran",
+    "ilköğretim_oran","okunmamış_oran","Tüketim Potansiyeli (Yüzde %)",
+    "DE Oran","Ortalama Hanehalkı","çocuk_oran","genç_oran",
+    "orta_yas_oran","yaslı_oran","bekar_oran",
+    "Konut Yoğunluğu (Konut/Km2)","Ortalama Kira Değerleri","Population_Density"
+]]}
 
-# --------------------------------------------------------------------
-# 3 · Ölçekleme & Yön Düzeltme
-# --------------------------------------------------------------------
-def scale_and_direct(df: pd.DataFrame) -> (pd.DataFrame, list):
-    feats = [f for grp in GROUPS.values() for f in grp["features"] if f in df.columns]
-    df2 = df[feats].copy()
-    df2[feats] = MinMaxScaler().fit_transform(df2[feats])
-    for f in feats:
-        if DIRECTIONS.get(f) == "neg":
-            df2[f] = 1.0 - df2[f]
-    return df2, feats
-
-# --------------------------------------------------------------------
-# 4 · Entropi Tabanlı Ağırlıklar
-# --------------------------------------------------------------------
-def compute_entropy_weights(df: pd.DataFrame, feats: list) -> dict:
-    P = df[feats] / (df[feats].sum(axis=0) + EPS)
-    H = shannon_entropy(P, base=np.e, axis=0)
-    d = 1 - H
-    total = d.sum()
-    return {feats[i]: float(d[i] / total) for i in range(len(feats))}
-
-# --------------------------------------------------------------------
-# 5 · Log-Multiplikatif Risk Skoru
-# --------------------------------------------------------------------
-def compute_risk_score(df: pd.DataFrame, weights: dict) -> pd.Series:
-    ln_part = sum(weights[f] * np.log(df[f] + EPS) for f in weights)
-    raw = np.exp(ln_part)
-    return 100 * (raw - raw.min()) / (raw.max() - raw.min())
-
-# --------------------------------------------------------------------
-# 6 · Quantile Segmentasyon
-# --------------------------------------------------------------------
-def assign_segment(df: pd.DataFrame, col: str, q: int = 3) -> pd.Series:
-    return pd.qcut(df[col], q=q, labels=[f"Seg{i+1}" for i in range(q)])
-
-# --------------------------------------------------------------------
-# 7 · Pipeline
+# 3. Pipeline
 # --------------------------------------------------------------------
 def pipeline(input_path: str, output_path: str):
+    # Veri yükle
     df = load_data(input_path)
-    df_scaled, feats = scale_and_direct(df)
 
-    weights = compute_entropy_weights(df_scaled, feats)
-    df["RiskScore"] = compute_risk_score(df_scaled, weights)
-    df["Segment"]   = assign_segment(df, "RiskScore", q=3)
+    # GROUPS içindeki feature'ları filtrele
+    all_feats = [f for g in GROUPS.values() for f in g['features']]
+    feats = [f for f in all_feats if f in df.columns]
+    if not feats:
+        sys.exit("❌ GROUPS içindeki hiçbir feature veri dosyasında bulunamadı.")
 
+    # Eksikleri at
+    df = df.dropna(subset=feats)
+
+    # Ölçekleme
+    df_s = df[feats].copy()
+    df_s[feats] = MinMaxScaler().fit_transform(df_s[feats])
+    # Yön düzeltme
+    for f in feats:
+        if DIRECTIONS.get(f) == "neg":
+            df_s[f] = 1.0 - df_s[f]
+
+    # Entropy ağırlıkları
+    P = df_s / (df_s.sum(axis=0) + EPS)
+    H = shannon_entropy(P, base=np.e, axis=0)
+    d = 1 - H
+    weights = {feats[i]: float(d[i]/d.sum()) for i in range(len(feats))}
+
+    # Log-multiplikatif risk skoru
+    ln_part = sum(weights[f] * np.log(df_s[f] + EPS) for f in feats)
+    raw = np.exp(ln_part)
+    df['RiskScore'] = 100 * (raw - raw.min()) / (raw.max() - raw.min())
+
+    # Segmentasyon
+    if df['RiskScore'].nunique() >= 3:
+        df['Segment'] = pd.qcut(df['RiskScore'], q=3, labels=['Düşük','Orta','Yüksek'])
+    else:
+        df['Segment'] = 'Orta'
+
+    # Kaydet + log
     df.to_csv(output_path)
-    print(f"✓ RiskScore ve Segment kolonları eklendi, {output_path} olarak kaydedildi.")
-    print("— Ağırlıklar:")
+    print(f"✓ Kullanılan feature sayısı: {len(feats)}")
+    print("✓ Ağırlıklar:")
     for k,v in weights.items():
         print(f"   {k:30} → {v:.3f}")
+    print(f"✓ RiskScore & Segment eklendi ve kaydedildi → {output_path}")
 
+# 4. Argparse
 # --------------------------------------------------------------------
-# 8 · Argparse & Çalıştırma
-# --------------------------------------------------------------------
-if __name__ == "__main__":
+if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument("--input",  required=True, help="Girdi CSV veya Excel dosyası (Lokasyon indexli)")
-    p.add_argument("--output", required=True, help="Çıktı CSV dosyası")
+    p.add_argument('--input',  required=True, help='Excel dosyası (İl, İlçe, Mahalle sütunlu)')
+    p.add_argument('--output', required=True, help='Çıktı CSV dosyası')
     args = p.parse_args()
-
     pipeline(args.input, args.output)
-
-Nasıl çalışır?
-
-1. --input ile verdiğiniz dosyayı önce CSV, hata alırsa Excel (openpyxl) olarak okur.
-
-
-2. GROUPS içindeki özellikleri MinMax ölçekler, DIRECTIONS ile “neg/pos” yön düzeltmesini yapar.
-
-
-3. Entropi metodu ile değişken ağırlıklarını hesaplar.
-
-
-4. Log-multiplikatif formülle 0–100 aralığında RiskScore üretir.
-
-
-5. pd.qcut ile üç eşit gözlemli segment (Seg1/Seg2/Seg3) atar.
-
-
-6. Sonucu CSV’ye yazar ve konsola ağırlıkları basar.
-
-
-
-Herhangi bir ek modül (TOPSIS/VIKOR, farklı segment sayısı, harita görselleştirme vb.) isterseniz bu iskeleti temel alarak hızlıca ekleyebilirsiniz.
-
