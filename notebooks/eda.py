@@ -1,120 +1,120 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-risk_segmentation_custom_loader.py
-
-Excel'den veri yükler, Lokasyon oluşturur, GROUPS içindeki feature'lara göre
-ölçekleme ve yön düzeltme yapar. Manuel olarak verilen grup ağırlıklarıyla
-ağırlıklı ortalama (dot product) yöntemiyle risk skoru oluşturur.
-
-Kullanım:
-    python risk_segmentation_custom_loader.py --input veri.xlsx --output results.csv
+lokasyon_risk_v3.py — MinMax Scaler, Topsis Risk Skoru, 0–100 Ölçek
 """
-
-import argparse
-import sys
 import pandas as pd
 import numpy as np
+from scipy.stats.mstats import winsorize
 from sklearn.preprocessing import MinMaxScaler
+from numpy.linalg import norm
 
-EPS = 1e-6
+# ─────────────────────────────────────────────────────────────────────────────
+# Yardımcı Fonksiyonlar
+# ─────────────────────────────────────────────────────────────────────────────
+def safe_div(numer, denom):
+    """Sıfıra bölünmeyi engelle (0/0 → 0)."""
+    denom = denom.replace(0, np.nan)
+    return (numer / denom).fillna(0)
 
-# 1. Veri Yükleme
-# --------------------------------------------------------------------
-def load_data(input_path: str) -> pd.DataFrame:
-    df = pd.read_excel(input_path)
+
+def entropy_weights(X: pd.DataFrame) -> pd.Series:
+    """
+    Entropi tabanlı bilgi-ağırlığı.
+    X : 0–1 ölçekli, yön uygulanmış DataFrame.
+    """
+    P = X.abs().div(X.abs().sum(axis=0) + 1e-9, axis=1)
+    n = len(X)
+    k = 1.0 / np.log(n + 1e-9)
+    ej = -k * (P * np.log(P + 1e-9)).sum(axis=0)
+    dj = 1.0 - ej
+    return dj / dj.sum()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ana Akış
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    # 1) Veri Yükle ve Lokasyon Anahtarı
+    df = pd.read_excel("veri.xlsx")
     df["Lokasyon"] = (
-        df["İl Adı"].astype(str) + "-" +
-        df["İlçe Adı"].astype(str) + "_" +
-        df["Mahalle Adı"].astype(str)
+        df["İl"].str.strip() + "_" +
+        df["İlçe"].str.strip() + "_" +
+        df["Mahalle"].str.strip()
     )
-    df.drop(columns=["İl Adı", "İlçe Adı", "Mahalle Adı"], inplace=True)
-    df.set_index("Lokasyon", inplace=True)
-    if "Toplam Nüfus" in df.columns:
-        df = df[df["Toplam Nüfus"] >= 500]
-    return df
 
-# 2. Gruplar & Ağırlıklar
-# --------------------------------------------------------------------
-GROUPS = {
-    "Gelir & Harcama": {"weight": 0.20, "features": [
-        "Aylık Ortalama Hane Geliri", "tasarruf_oran", "Bireysel Kredi / Gelir",
-        "Toplam Mevduat / Gelir", "gelir_kira_yuku", "Toplam Harcama",
-        "Max_Min_Income_Ratio", "Income_Gini_Proxy"]},
-    "Kredi & Bankacılık": {"weight": 0.10, "features": ["Kullanılan Toplam Kredi (BinTL)", "kart_kisi_oran"]},
-    "Coğrafi & Afet": {"weight": 0.10, "features": ["Deprem Puan", "Bölge Riski"]},
-    "Eğitim": {"weight": 0.15, "features": [
-        "Ortalama Eğitim Süresi (Yıl)", "lisansüstü_oran", "üniversite_oran",
-        "ilkokul_oran", "ilköğretim_oran", "okunmamış_oran", "okuryazar_oran"]},
-    "Tüketim & SES": {"weight": 0.10, "features": [
-        "Tüketim Potansiyeli (Yüzde %)", "Ortalama SES", "Gelişmişlik Katsayısı",
-        "AB Oran", "DE Oran"]},
-    "Demografi": {"weight": 0.15, "features": [
-        "Ortalama Hanehalkı", "çocuk_oran", "genç_oran", "orta_yas_oran",
-        "yaslı_oran", "bekar_oran", "evli_oran", "Working_Age_Share", "Dependency_Ratio"]},
-    "Çalışma": {"weight": 0.05, "features": ["Çalışan Oranı"]},
-    "Altyapı": {"weight": 0.10, "features": [
-        "Konut Yoğunluğu (Konut/Km2)", "Ortalama Kira Değerleri",
-        "Alan Büyüklüğü / km2", "Population_Density"]},
-    "Varlık": {"weight": 0.05, "features": ["Hane Başı Araç Sahipliği"]}
-}
+    # 2) Feature-Engineering
+    df_feat = df.copy()
+    df_feat["depend_ratio"]        = safe_div(df["0-15 Kişi Sayısı"] + df["55+ Kişi Sayısı"],
+                                                    df["15-25 Kişi Sayısı"] + df["25-40 Kişi Sayısı"] + df["40-55 Kişi Sayısı"])
+    df_feat["female_share"]        = safe_div(df["Kadın Nüfusu"], df["Toplam Nüfus"])
+    df_feat["syria_share"]         = safe_div(df["Geçici Koruma Kapsamındaki Suriyeli Sayısı"], df["Toplam Nüfus"])
+    df_feat["foreign_share"]       = safe_div(df["İkamet Eden Yabancı"], df["Toplam Nüfus"])
+    df_feat["income_per_house"]    = safe_div(df["Aylık Ortalama Hane Geliri"], df["Hanehalkı Sayısı"])
+    df_feat["saving_rate"]         = safe_div(df["Aylık Hane Tasarrufu"], df["Aylık Ortalama Hane Harcaması"])
+    df_feat["spending_propensity"] = safe_div(df["Aylık Ortalama Hane Harcaması"], df["Aylık Ortalama Hane Geliri"])
+    df_feat["credit_per_capita"]   = safe_div(df["Bireysel Kredi (Bin TL)"], df["Toplam Nüfus"])
+    df_feat["card_per_adult"]      = safe_div(df["Kredi Kartı Sayısı"], df["15-55 Kişi Sayısı"])
+    df_feat["deposit_per_capita"]  = safe_div(df["Toplam Mevduat (BinTL)"], df["Toplam Nüfus"])
+    df_feat["loan_to_deposit"]     = safe_div(df["Bireysel Kredi (Bin TL)"], df["Toplam Mevduat (BinTL)"])
+    df_feat["employment_rate"]     = df["Çalışan Oran"]
+    df_feat["firm_density"]        = safe_div(df["İş Yeri Sayısı Kent (Adet)"], df["Toplam Nüfus"])
+    df_feat["atm_credit_ratio"]    = safe_div(df["Banka Kartı Sayısı"] + df["Kredi Kartı Sayısı"], df["Toplam Nüfus"])
+    df_feat["uni_rate"]            = safe_div(df["Üniversitede Okuyan Öğrenci sayısı"], df["Toplam Nüfus"])
+    df_feat["literacy_inv"]        = 1 - safe_div(df["Okur Yazarlık Sayısı"], df["Toplam Nüfus"])
+    df_feat["household_per_house"] = safe_div(df["Hanehalkı Sayısı"], df["Konut Sayısı"])
+    df_feat["vacancy_proxy"]       = safe_div(df["Konut Sayısı"] - df["Hanehalkı Sayısı"], df["Konut Sayısı"])
 
-DIRECTIONS = {
-    **{f: "neg" for f in [
-        "Aylık Ortalama Hane Geliri","tasarruf_oran","Toplam Mevduat / Gelir",
-        "Ortalama Eğitim Süresi (Yıl)","lisansüstü_oran","üniversite_oran",
-        "okuryazar_oran","Ortalama SES","Gelişmişlik Katsayısı",
-        "AB Oran","evli_oran","Working_Age_Share","Çalışan Oranı",
-        "Alan Büyüklüğü / km2","Hane Başı Araç Sahipliği"]},
-    **{f: "pos" for f in [
-        "Bireysel Kredi / Gelir","gelir_kira_yuku","Toplam Harcama",
-        "Max_Min_Income_Ratio","Income_Gini_Proxy","Kullanılan Toplam Kredi (BinTL)",
-        "kart_kisi_oran","Deprem Puan","Bölge Riski","ilkokul_oran",
-        "ilköğretim_oran","okunmamış_oran","Tüketim Potansiyeli (Yüzde %)",
-        "DE Oran","Ortalama Hanehalkı","çocuk_oran","genç_oran",
-        "orta_yas_oran","yaslı_oran","bekar_oran",
-        "Konut Yoğunluğu (Konut/Km2)","Ortalama Kira Değerleri","Population_Density"]}
+    FEATURES = [
+        "depend_ratio","female_share","syria_share","foreign_share",
+        "income_per_house","saving_rate","spending_propensity",
+        "credit_per_capita","card_per_adult","deposit_per_capita","loan_to_deposit",
+        "employment_rate","firm_density","atm_credit_ratio",
+        "uni_rate","literacy_inv","household_per_house","vacancy_proxy",
+    ]
 
-# 3. Pipeline
-# --------------------------------------------------------------------
-def pipeline(input_path: str, output_path: str):
-    df = load_data(input_path)
+    DIRECTION = {col: +1 for col in FEATURES}
+    for col in ["income_per_house","saving_rate","deposit_per_capita","employment_rate","uni_rate"]:
+        DIRECTION[col] = -1
 
-    feats = [f for g in GROUPS.values() for f in g['features'] if f in df.columns]
-    df = df.dropna(subset=feats)
+    for col in FEATURES:
+        df_feat[col] = winsorize(df_feat[col], limits=[0.01, 0.01])
 
-    df_s = df[feats].copy()
-    df_s[feats] = MinMaxScaler().fit_transform(df_s[feats])
-    for f in feats:
-        if DIRECTIONS.get(f) == "neg":
-            df_s[f] = 1.0 - df_s[f]
+    scaler = MinMaxScaler()
+    X_scaled = pd.DataFrame(
+        scaler.fit_transform(df_feat[FEATURES]),
+        columns=FEATURES,
+        index=df_feat.index
+    )
 
-    # Grup bazlı ağırlıklı skor
-    score = pd.Series(0, index=df.index, dtype=float)
-    for group, meta in GROUPS.items():
-        group_feats = [f for f in meta['features'] if f in df_s.columns]
-        if group_feats:
-            group_avg = df_s[group_feats].mean(axis=1)
-            score += meta['weight'] * group_avg
+    X_dir = X_scaled.mul(pd.Series(DIRECTION), axis=1)
 
-    df['RiskScore'] = 100 * (score - score.min()) / (score.max() - score.min())
+    w_raw = entropy_weights(X_dir)
 
-    if df['RiskScore'].nunique() >= 3:
-        df['Segment'] = pd.qcut(df['RiskScore'], q=3, labels=['Düşük','Orta','Yüksek'])
-    else:
-        df['Segment'] = 'Orta'
+    # TOPSIS tabanlı risk skoru
+    ideal     = X_dir.max()
+    antiideal = X_dir.min()
+    d_plus  = norm(X_dir - ideal, axis=1)
+    d_minus = norm(X_dir - antiideal, axis=1)
+    df_feat["risk_score"] = (d_plus / (d_plus + d_minus + 1e-9)) * 100
 
-    df.to_csv(output_path)
-    print("✓ Grup ağırlıkları ile RiskScore hesaplandı.")
-    print("✓ Segment ataması yapıldı ve sonuç kaydedildi.")
+    lokasyon_risk = (
+        df_feat.groupby("Lokasyon")["risk_score"]
+               .mean()
+               .reset_index(name="risk_score")
+    )
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input',  required=True, help='Excel dosyası')
-    parser.add_argument('--output', required=True, help='Çıktı CSV dosyası')
-    args = parser.parse_args()
-    pipeline(args.input, args.output)
+    lokasyon_risk["risk_group"] = pd.qcut(
+        lokasyon_risk["risk_score"], q=4,
+        labels=["Düşük","Orta-Düşük","Orta-Yüksek","Yüksek"]
+    )
+
+    lokasyon_risk.to_csv("lokasyon_risk_scores_v3.csv", index=False)
+    print("--- En Riskli 10 Lokasyon ---")
+    print(lokasyon_risk.nlargest(10, "risk_score"))
+
+if __name__ == "__main__":
+    main()
 
 
-Kod başarıyla güncellendi. Artık risk skoru, her bir GROUP için manuel belirlenmiş ağırlıklarla ve grup ortalamaları üzerinden hesaplanıyor. Bu daha kontrollü ve açıklanabilir bir yöntemdir. Artık çalıştırarak gerçek verinizle sonucu alabilirsiniz. Hazırsanız test edebiliriz.
+Kodun “risk skoru” kısmı artık TOPSIS (vektörel mesafe tabanlı) yönteme göre hesaplanıyor. Skorlar 0–100 arasında normalize ediliyor ve 4 segmente ayrılıyor. Hazırsan bir sonraki adımda bu skorları harita, grafik veya stratejik raporlamaya taşıyabiliriz. Devam edelim mi?
 
