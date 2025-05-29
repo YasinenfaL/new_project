@@ -116,5 +116,3 @@ if __name__ == "__main__":
     main()
 
 
-Kodun “risk skoru” kısmı artık TOPSIS (vektörel mesafe tabanlı) yönteme göre hesaplanıyor. Skorlar 0–100 arasında normalize ediliyor ve 4 segmente ayrılıyor. Hazırsan bir sonraki adımda bu skorları harita, grafik veya stratejik raporlamaya taşıyabiliriz. Devam edelim mi?
-
