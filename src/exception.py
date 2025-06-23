@@ -1,23 +1,77 @@
-import sys
-from src.logger import logging
+import time
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.linear_model import Ridge, Lasso, ElasticNet, HuberRegressor, LinearRegression
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import (
+    RandomForestRegressor, GradientBoostingRegressor, AdaBoostRegressor,
+    ExtraTreesRegressor, HistGradientBoostingRegressor, BaggingRegressor
+)
+from sklearn.svm import SVR
+from sklearn.neighbors import KNeighborsRegressor
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from catboost import CatBoostRegressor
 
 
-def error_message_detail(error, error_detail: sys):
-    _, _, exc_tb = error_detail.exc_info()
-    file_name = exc_tb.tb_frame.f_code.co_filename
-    error_message = "Error occured in python script name [{0}] line number [{1}] error message[{2}]".format(
-        file_name, exc_tb.tb_lineno, str(error))
+def evaluate_regression_models(X, y, test_size=0.2, random_state=42):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state
+    )
 
-    return error_message
+    models = {
+        "LinearRegression": LinearRegression(n_jobs=-1),
+        "Ridge": Ridge(alpha=1.0, solver="auto", random_state=random_state),
+        "Lasso": Lasso(alpha=0.01, max_iter=2000, random_state=random_state),
+        "ElasticNet": ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=2000, random_state=random_state),
+        "HuberRegressor": HuberRegressor(epsilon=1.35, max_iter=2000),
+        "DecisionTree": DecisionTreeRegressor(max_depth=10, min_samples_leaf=5, random_state=random_state),
+        "RandomForest": RandomForestRegressor(n_estimators=300, max_depth=10, min_samples_leaf=3,
+                                              n_jobs=-1, random_state=random_state),
+        "ExtraTrees": ExtraTreesRegressor(n_estimators=300, max_depth=10, min_samples_leaf=3,
+                                          n_jobs=-1, random_state=random_state),
+        "GradientBoosting": GradientBoostingRegressor(n_estimators=300, learning_rate=0.05,
+                                                      max_depth=5, subsample=0.9, random_state=random_state),
+        "HistGradientBoosting": HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05,
+                                                               max_depth=6, random_state=random_state),
+        "AdaBoost": AdaBoostRegressor(n_estimators=300, learning_rate=0.05, random_state=random_state),
+        "Bagging": BaggingRegressor(n_estimators=100, random_state=random_state, n_jobs=-1),
+        "SVR": SVR(C=1.0, epsilon=0.1, kernel='rbf'),
+        "KNeighbors": KNeighborsRegressor(n_neighbors=7, weights='distance', n_jobs=-1),
+        "XGBoost": XGBRegressor(n_estimators=300, learning_rate=0.05, max_depth=6,
+                                subsample=0.9, colsample_bytree=0.8,
+                                random_state=random_state, n_jobs=-1),
+        "LightGBM": LGBMRegressor(n_estimators=300, learning_rate=0.05, num_leaves=64,
+                                  subsample=0.9, colsample_bytree=0.8, random_state=random_state, n_jobs=-1),
+        "CatBoost": CatBoostRegressor(iterations=300, depth=6, learning_rate=0.05,
+                                      l2_leaf_reg=3, verbose=False, random_state=random_state)
+    }
 
+    for name, model in models.items():
+        print(f"\n=== {name} ===")
+        try:
+            start = time.time()
+            model.fit(X_train, y_train)
+            elapsed = time.time() - start
 
-class CustomException(Exception):
-    def __init__(self, error_message, error_detail: sys):
-        super().__init__(error_message)
-        self.error_message = error_message_detail(error_message, error_detail=error_detail)
+            y_train_pred = model.predict(X_train)
+            y_test_pred = model.predict(X_test)
 
-    def __str__(self):
-        return self.error_message
+            # Skorlar
+            r2_train = r2_score(y_train, y_train_pred)
+            r2_test = r2_score(y_test, y_test_pred)
 
+            rmse_train = np.sqrt(mean_squared_error(y_train, y_train_pred))
+            rmse_test = np.sqrt(mean_squared_error(y_test, y_test_pred))
 
+            mae_train = mean_absolute_error(y_train, y_train_pred)
+            mae_test = mean_absolute_error(y_test, y_test_pred)
 
+            print(f"[Train] R²: {r2_train:.4f} | RMSE: {rmse_train:.4f} | MAE: {mae_train:.4f}")
+            print(f"[Test ] R²: {r2_test:.4f} | RMSE: {rmse_test:.4f} | MAE: {mae_test:.4f}")
+            print(f"Runtime : {elapsed:.2f} sec")
+
+        except Exception as e:
+            print(f"[!] {name} hata verdi: {e}")
