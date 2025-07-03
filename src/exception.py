@@ -15,6 +15,108 @@ from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 
+
+# — 3) Train-test split —
+X_train, X_test, y_train_log, y_test_log = train_test_split(
+    X, y_log, test_size=0.2, random_state=42
+)
+
+# — 4) Modelleri tanımlayın —
+models = {
+    "LinearRegression": LinearRegression(n_jobs=-1),
+    "Ridge": Ridge(alpha=1.0, random_state=42),
+    "Lasso": Lasso(alpha=0.01, max_iter=2000, random_state=42),
+    "ElasticNet": ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=2000, random_state=42),
+    "HuberRegressor": HuberRegressor(epsilon=1.35, max_iter=2000),
+    "DecisionTree": DecisionTreeRegressor(max_depth=10, min_samples_leaf=5, random_state=42),
+    "RandomForest": RandomForestRegressor(
+        n_estimators=100, max_depth=10, min_samples_leaf=3,
+        n_jobs=-1, random_state=42
+    ),
+    "ExtraTrees": ExtraTreesRegressor(
+        n_estimators=100, max_depth=10, min_samples_leaf=3,
+        n_jobs=-1, random_state=42
+    ),
+    "GradientBoosting": GradientBoostingRegressor(
+        n_estimators=100, learning_rate=0.05,
+        max_depth=5, subsample=0.9, random_state=42
+    ),
+    "HistGradientBoosting": HistGradientBoostingRegressor(
+        max_iter=100, learning_rate=0.05,
+        max_depth=6, random_state=42
+    ),
+    "AdaBoost": AdaBoostRegressor(
+        n_estimators=100, learning_rate=0.05, random_state=42
+    ),
+    "Bagging": BaggingRegressor(
+        n_estimators=50, random_state=42, n_jobs=-1
+    ),
+    "SVR": SVR(C=1.0, epsilon=0.1, kernel='rbf'),
+    "KNeighbors": KNeighborsRegressor(
+        n_neighbors=7, weights='distance', n_jobs=-1
+    ),
+    "XGBoost": XGBRegressor(
+        n_estimators=100, learning_rate=0.05, max_depth=6,
+        subsample=0.9, colsample_bytree=0.8,
+        random_state=42, n_jobs=-1
+    ),
+    "LightGBM": LGBMRegressor(
+        n_estimators=100, learning_rate=0.05, num_leaves=64,
+        subsample=0.9, colsample_bytree=0.8,
+        random_state=42, n_jobs=-1
+    ),
+    "CatBoost": CatBoostRegressor(
+        iterations=100, depth=6, learning_rate=0.05,
+        l2_leaf_reg=3, verbose=False, random_state=42
+    )
+}
+
+# — 5) Eğitim, tahmin ve inverse-transform ile metrik hesabı —
+for name, model in models.items():
+    print(f"\n=== {name} ===")
+    try:
+        t0 = time.time()
+        model.fit(X_train, y_train_log)
+        fit_time = time.time() - t0
+
+        # Log-ölçekte tahminler
+        y_train_pred_log = model.predict(X_train)
+        y_test_pred_log  = model.predict(X_test)
+
+        # Inverse-transform: orijinal ölçeğe geri dönüş
+        y_train_true = np.expm1(y_train_log)
+        y_test_true  = np.expm1(y_test_log)
+        y_train_pred = np.expm1(y_train_pred_log)
+        y_test_pred  = np.expm1(y_test_pred_log)
+
+        # Orijinal ölçekte metrikler
+        r2_tr = r2_score(y_train_true, y_train_pred)
+        r2_te = r2_score(y_test_true,  y_test_pred)
+
+        rmse_tr = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
+        rmse_te = np.sqrt(mean_squared_error(y_test_true,  y_test_pred))
+
+        mae_tr = mean_absolute_error(y_train_true, y_train_pred)
+        mae_te = mean_absolute_error(y_test_true,  y_test_pred)
+
+        print(f"[Train] R²: {r2_tr:.4f} | RMSE: {rmse_tr:.4f} | MAE: {mae_tr:.4f}")
+        print(f"[Test ] R²: {r2_te:.4f} | RMSE: {rmse_te:.4f} | MAE: {mae_te:.4f}")
+        print(f"Fit time: {fit_time:.2f} sec")
+
+    except Exception as e:
+        print(f"[!] {name} hata verdi: {e}")
+
+
+
+
+
+
+
+
+ChatGPT’ye sor
+
+
+
 def evaluate_regression_models(
     X, y,
     test_size=0.2,
