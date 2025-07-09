@@ -16,21 +16,22 @@ def objective(trial):
         'n_jobs': -1,
         'random_state': 42,
         'n_estimators': trial.suggest_int('n_estimators', 100, 1000, step=100),
-        'learning_rate': trial.suggest_loguniform('learning_rate', 1e-3, 0.3),
+        'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
         'num_leaves': trial.suggest_int('num_leaves', 16, 256),
         'max_depth': trial.suggest_int('max_depth', 3, 16),
-        'subsample': trial.suggest_uniform('subsample', 0.5, 1.0),
+        'subsample': trial.suggest_float('subsample', 0.5, 1.0, log=False),
         'subsample_freq': trial.suggest_int('subsample_freq', 1, 10),
         'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-        'reg_alpha': trial.suggest_loguniform('reg_alpha', 1e-8, 10.0),
-        'reg_lambda': trial.suggest_loguniform('reg_lambda', 1e-8, 10.0),
+        'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
+        'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
     }
 
     gbm = lgb.LGBMRegressor(**param)
-    # Negatif MAE döner; maximize edeceğiz
     scores = cross_val_score(
-        gbm, X_train, y_train_log,
-        scoring='neg_mean_absolute_error', cv=5
+        gbm,
+        X_train, y_train_log,
+        scoring='neg_mean_absolute_error',
+        cv=5
     )
     return scores.mean()
 
@@ -44,9 +45,6 @@ study.optimize(objective, n_trials=50, show_progress_bar=True)
 
 print("► En iyi skor (neg MAE):", study.best_value)
 print("► En iyi parametreler:", study.best_params)
-
-
-
 
 
 
