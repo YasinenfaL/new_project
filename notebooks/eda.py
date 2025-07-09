@@ -5,6 +5,52 @@ import lightgbm as lgb
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import pickle, gzip
 
+
+# --- 2) Optuna objective fonksiyonu ---
+def objective(trial):
+    param = {
+        'objective': 'regression',
+        'metric': 'mae',
+        'verbosity': -1,
+        'boosting_type': 'gbdt',
+        'n_jobs': -1,
+        'random_state': 42,
+        'n_estimators': trial.suggest_int('n_estimators', 100, 1000, step=100),
+        'learning_rate': trial.suggest_loguniform('learning_rate', 1e-3, 0.3),
+        'num_leaves': trial.suggest_int('num_leaves', 16, 256),
+        'max_depth': trial.suggest_int('max_depth', 3, 16),
+        'subsample': trial.suggest_uniform('subsample', 0.5, 1.0),
+        'subsample_freq': trial.suggest_int('subsample_freq', 1, 10),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+        'reg_alpha': trial.suggest_loguniform('reg_alpha', 1e-8, 10.0),
+        'reg_lambda': trial.suggest_loguniform('reg_lambda', 1e-8, 10.0),
+    }
+
+    gbm = lgb.LGBMRegressor(**param)
+    # Negatif MAE döner; maximize edeceğiz
+    scores = cross_val_score(
+        gbm, X_train, y_train_log,
+        scoring='neg_mean_absolute_error', cv=5
+    )
+    return scores.mean()
+
+# --- 3) Optuna Study ---
+study = optuna.create_study(
+    direction="maximize",
+    sampler=TPESampler(seed=42),
+    pruner=MedianPruner(n_startup_trials=5)
+)
+study.optimize(objective, n_trials=50, show_progress_bar=True)
+
+print("► En iyi skor (neg MAE):", study.best_value)
+print("► En iyi parametreler:", study.best_params)
+
+
+
+
+
+
+
 # --- 1) Veri Hazırlığı ---
 # df: DataFrame'iniz
 # target_column: Hedef sütun adı
