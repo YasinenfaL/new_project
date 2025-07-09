@@ -1,123 +1,295 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-from ace_tools import display_dataframe_to_user
+# LOAN MODEL CONFIG
+loan:
+  feature_selection:
+    selected_features:
+      - age
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - CityId
+      - income
+      - IsActiveProject
+      - IsActive
 
-def eda_report(df: pd.DataFrame, target: str = None, plots: bool = True):
-    """
-    Comprehensive EDA report including:
-      1. Basic info & missing values
-      2. Full dataset display
-      3. Numeric descriptive statistics
-      4. Missing value analysis
-      5. Histograms & boxplots for numeric features (optional)
-      6. Value counts & bar plots for categorical features (optional)
-      7. If target provided:
-         - Categorical vs target relationship (tables + optional plots)
-         - Numeric vs target relationship (tables + optional plots)
-         - Correlation with target (tables + optional plots)
-    
-    Args:
-        df (pd.DataFrame): Input DataFrame
-        target (str): Name of target column. If None, target-related analyses are skipped.
-        plots (bool): Whether to show plots (True) or skip them (False).
-    """
-    # 1. Basic Info & Missing
-    info = pd.DataFrame({
-        'dtype': df.dtypes,
-        'missing': df.isnull().sum(),
-        'missing_pct': (df.isnull().mean() * 100).round(2),
-        'unique': df.nunique()
-    }).sort_values('missing', ascending=False)
-    display_dataframe_to_user("Basic Info & Missing", info)
+  data_types:
+    to_object:
+      - gender
+      - education_level
+      - marital_status
+      - job_type
 
-    # 2. Full Data Display
-    display_dataframe_to_user("Full Dataset", df)
+  missing_values:
+    fill_zero:
+      - income
 
-    # 3. Numeric Descriptive Statistics
-    num_df = df.select_dtypes(include='number')
-    desc = num_df.describe().T
-    display_dataframe_to_user("Numeric Descriptive Statistics", desc)
+  region_mapping:
+    plaka_column: CityId
+    output_column: region
+    Marmara: [34, 41, 59]
+    Ege: [35, 48]
+    Akdeniz: [1, 7, 31]
+    İç_Anadolu: [6, 42]
+    Karadeniz: [61, 52]
+    Doğu_Anadolu: [25, 44]
+    Güneydoğu_Anadolu: [27, 63]
 
-    # 4. Missing Value Analysis
-    missing = pd.DataFrame({
-        'missing': df.isnull().sum(),
-        'missing_pct': (df.isnull().mean() * 100).round(2)
-    }).loc[lambda x: x['missing'] > 0].sort_values('missing', ascending=False)
-    display_dataframe_to_user("Missing Value Analysis", missing)
+  default_risk_scores:
+    Marmara: 0.2
+    Ege: 0.3
+    Akdeniz: 0.4
+    İç_Anadolu: 0.5
+    Karadeniz: 0.45
+    Doğu_Anadolu: 0.6
+    Güneydoğu_Anadolu: 0.65
+    Unknown: 1.0
 
-    # 5. Numeric Plots
-    if plots:
-        for col in num_df.columns:
-            plt.figure()
-            plt.hist(df[col].dropna(), bins=30)
-            plt.title(f"Histogram of {col}")
-            plt.xlabel(col)
-            plt.ylabel("Frequency")
-            plt.show()
+  feature_mapping:
+    column_mapping:
+      education_level: education_mapping
+      marital_status: marital_mapping
+      job_type: job_mapping
+      gender: gender_mapping
+      IsActiveProject: isactiveproject_mapping
+      IsActive: isactive_mapping
+    education_mapping:
+      "1": "Primary"
+      "2": "Secondary"
+      "3": "Higher"
+    job_mapping:
+      "1": "Worker"
+      "2": "Officer"
+      "3": "Manager"
+    marital_mapping:
+      "1": "Single"
+      "2": "Married"
+      "3": "Divorced"
+    gender_mapping:
+      "0": "Erkek"
+      "1": "Kadın"
+    isactiveproject_mapping:
+      "0": "Hayır"
+      "1": "Evet"
+    isactive_mapping:
+      "0": "Hayır"
+      "1": "Evet"
 
-            plt.figure()
-            plt.boxplot(df[col].dropna(), vert=False)
-            plt.title(f"Boxplot of {col}")
-            plt.xlabel(col)
-            plt.show()
+  feature_encoding:
+    categorical_cols:
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - region
+      - IsActiveProject
 
-    # 6. Categorical Value Counts & Optional Bar Plots
-    cat_cols = df.select_dtypes(include=['object', 'category']).columns
-    for col in cat_cols:
-        counts = df[col].value_counts()
-        display_dataframe_to_user(f"Value Counts for {col}", counts.to_frame(name='count'))
-        if plots:
-            plt.figure(figsize=(8, 4))
-            plt.bar(counts.index.astype(str), counts.values)
-            plt.xticks(rotation=45, ha='right')
-            plt.title(f"Value Counts - {col}")
-            plt.xlabel(col)
-            plt.ylabel("Count")
-            plt.tight_layout()
-            plt.show()
+  scaling:
+    exclude_columns:
+      - city_code
+      - age
 
-    # 7. Target-based analyses
-    if target and target in df.columns:
-        # Categorical vs Target
-        for col in cat_cols:
-            if col == target:
-                continue
-            ct = df.groupby(col)[target].agg(['count', 'mean']).rename(columns={'mean':'target_rate'})
-            display_dataframe_to_user(f"Target by {col}", ct)
-            if plots:
-                plt.figure(figsize=(8, 4))
-                plt.bar(ct.index.astype(str), ct['target_rate'])
-                plt.xticks(rotation=45, ha='right')
-                plt.title(f"Mean {target} by {col}")
-                plt.ylabel(f"Mean {target}")
-                plt.tight_layout()
-                plt.show()
+  model_input_selection:
+    include_columns:
+      - age
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - region
+      - income
+      - IsActiveProject
+      - IsActive
+      - risk_score
 
-        # Numeric vs Target
-        for col in num_df.columns:
-            if col == target:
-                continue
-            stats = df.groupby(target)[col].agg(['mean', 'median', 'std', 'count'])
-            display_dataframe_to_user(f"{col} stats by {target}", stats)
-            if plots:
-                plt.figure()
-                df.boxplot(column=col, by=target, grid=False)
-                plt.title(f"{col} distribution by {target}")
-                plt.suptitle("")
-                plt.show()
+# CAR MODEL CONFIG
+car:
+  feature_selection:
+    selected_features:
+      - age
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - CityId
+      - income
+      - IsActiveProject
 
-        # Correlation with Target
-        feats = [c for c in df.columns if c != target and c in num_df.columns]
-        corr_target = df[feats + [target]].corr()[target].drop(target).sort_values(key=abs, ascending=False)
-        display_dataframe_to_user("Correlation with Target", corr_target.to_frame(name='corr_with_target'))
-        if plots:
-            plt.figure(figsize=(8, 4))
-            plt.bar(corr_target.index, corr_target.values)
-            plt.xticks(rotation=90)
-            plt.title(f"Feature Correlation with {target}")
-            plt.tight_layout()
-            plt.show()
+  data_types:
+    to_object:
+      - gender
+      - education_level
+      - marital_status
+      - job_type
 
-# Usage example:
-# df = pd.read_csv("veri.csv")
-# eda_report(df, target='hedef', plots=True)
+  missing_values:
+    fill_zero:
+      - income
+
+  region_mapping:
+    plaka_column: CityId
+    output_column: region
+    Marmara: [34, 41, 59]
+    Ege: [35, 48]
+    Akdeniz: [1, 7, 31]
+    İç_Anadolu: [6, 42]
+    Karadeniz: [61, 52]
+    Doğu_Anadolu: [25, 44]
+    Güneydoğu_Anadolu: [27, 63]
+
+  default_risk_scores:
+    Marmara: 0.15
+    Ege: 0.25
+    Akdeniz: 0.35
+    İç_Anadolu: 0.45
+    Karadeniz: 0.4
+    Doğu_Anadolu: 0.55
+    Güneydoğu_Anadolu: 0.6
+    Unknown: 1.0
+
+  feature_mapping:
+    column_mapping:
+      education_level: education_mapping
+      marital_status: marital_mapping
+      job_type: job_mapping
+      gender: gender_mapping
+      IsActiveProject: isactiveproject_mapping
+    education_mapping:
+      "1": "Primary"
+      "2": "Secondary"
+      "3": "Higher"
+    job_mapping:
+      "1": "Worker"
+      "2": "Officer"
+      "3": "Manager"
+    marital_mapping:
+      "1": "Single"
+      "2": "Married"
+      "3": "Divorced"
+    gender_mapping:
+      "0": "Erkek"
+      "1": "Kadın"
+    isactiveproject_mapping:
+      "0": "Hayır"
+      "1": "Evet"
+
+  feature_encoding:
+    categorical_cols:
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - region
+      - IsActiveProject
+
+  scaling:
+    exclude_columns:
+      - city_code
+      - age
+
+  model_input_selection:
+    include_columns:
+      - age
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - region
+      - income
+      - IsActiveProject
+      - risk_score
+
+# HOME MODEL CONFIG
+home:
+  feature_selection:
+    selected_features:
+      - age
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - CityId
+      - income
+      - IsActive
+
+  data_types:
+    to_object:
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+
+  missing_values:
+    fill_zero:
+      - income
+
+  region_mapping:
+    plaka_column: CityId
+    output_column: region
+    Marmara: [34, 41, 59]
+    Ege: [35, 48]
+    Akdeniz: [1, 7, 31]
+    İç_Anadolu: [6, 42]
+    Karadeniz: [61, 52]
+    Doğu_Anadolu: [25, 44]
+    Güneydoğu_Anadolu: [27, 63]
+
+  default_risk_scores:
+    Marmara: 0.1
+    Ege: 0.2
+    Akdeniz: 0.3
+    İç_Anadolu: 0.4
+    Karadeniz: 0.35
+    Doğu_Anadolu: 0.5
+    Güneydoğu_Anadolu: 0.55
+    Unknown: 1.0
+
+  feature_mapping:
+    column_mapping:
+      education_level: education_mapping
+      marital_status: marital_mapping
+      job_type: job_mapping
+      gender: gender_mapping
+      IsActive: isactive_mapping
+    education_mapping:
+      "1": "Primary"
+      "2": "Secondary"
+      "3": "Higher"
+    job_mapping:
+      "1": "Worker"
+      "2": "Officer"
+      "3": "Manager"
+    marital_mapping:
+      "1": "Single"
+      "2": "Married"
+      "3": "Divorced"
+    gender_mapping:
+      "0": "Erkek"
+      "1": "Kadın"
+    isactive_mapping:
+      "0": "Hayır"
+      "1": "Evet"
+
+  feature_encoding:
+    categorical_cols:
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - region
+
+  scaling:
+    exclude_columns:
+      - city_code
+      - age
+
+  model_input_selection:
+    include_columns:
+      - age
+      - gender
+      - education_level
+      - marital_status
+      - job_type
+      - region
+      - income
+      - IsActive
+      - risk_score
