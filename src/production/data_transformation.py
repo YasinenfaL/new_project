@@ -1,129 +1,108 @@
-import sys
-import os
+from dataclasses import dataclass, field
+from pathlib import Path
 import yaml
-from dataclasses import dataclass
-import numpy as np
-import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-
-from src.exception import CustomException
-from src.logger import logging
-from src.utils import save_object
-
-
-def load_config(config_path: str) -> dict:
-    """YAML konfigürasyon dosyasını yükler."""
-    try:
-        with open(config_path, "r") as file:
-            config = yaml.safe_load(file)
-        return config
-    except Exception as e:
-        raise CustomException(e, sys)
-
+from typing import List, Dict
 
 @dataclass
-class DataTransformationConfig:
-    config_path: str = "config.yaml"
+class FeatureSelectionConfig:
+    selected_features: List[str]
 
-    # YAML dosyasından yüklenen değerler
-    numerical_columns: list = None
-    categorical_columns: list = None
-    target_column: str = None
-    preprocessor_obj_file_path: str = None
+@dataclass
+class DataTypeConfig:
+    to_object: List[str]
 
-    def __post_init__(self):
-        """YAML dosyasını okuyarak değişkenleri doldur."""
-        config = load_config(self.config_path)
-        self.numerical_columns = config["data_transformation"]["numerical_columns"]
-        self.categorical_columns = config["data_transformation"]["categorical_columns"]
-        self.target_column = config["data_transformation"]["target_column"]
-        self.preprocessor_obj_file_path = config["data_transformation"]["preprocessor_file_path"]
+@dataclass
+class MissingValuesConfig:
+    fill_zero: List[str]
 
+@dataclass
+class RegionMappingConfig:
+    plaka_column: str
+    output_column: str
+    Marmara: List[int]
+    Ege: List[int]
+    Akdeniz: List[int]
+    İç_Anadolu: List[int]
+    Karadeniz: List[int]
+    Doğu_Anadolu: List[int]
+    Güneydoğu_Anadolu: List[int]
 
-class DataTransformation:
-    def __init__(self):
-        self.data_transformation_config = DataTransformationConfig()
+    def get_region(self, plaka: int) -> str:
+        regions = {
+            'Marmara': self.Marmara,
+            'Ege': self.Ege,
+            'Akdeniz': self.Akdeniz,
+            'İç Anadolu': self.İç_Anadolu,
+            'Karadeniz': self.Karadeniz,
+            'Doğu Anadolu': self.Doğu_Anadolu,
+            'Güneydoğu Anadolu': self.Güneydoğu_Anadolu
+        }
+        for region, codes in regions.items():
+            if plaka in codes:
+                return region
+        return 'Bilinmeyen'
 
-    def get_data_transformer_object(self):
-        """
-        Veri dönüşüm nesnesini oluşturur.
-        """
-        try:
-            num_pipeline = Pipeline(
-                steps=[
-                    ("imputer", SimpleImputer(strategy="median")),
-                    ("scaler", StandardScaler())
-                ]
-            )
+@dataclass
+class DefaultRiskScoresConfig:
+    Marmara: float
+    Ege: float
+    Akdeniz: float
+    İç_Anadolu: float
+    Karadeniz: float
+    Doğu_Anadolu: float
+    Güneydoğu_Anadolu: float
+    Unknown: float
 
-            cat_pipeline = Pipeline(
-                steps=[
-                    ("imputer", SimpleImputer(strategy="most_frequent")),
-                    ("one_hot_encoder", OneHotEncoder()),
-                    ("scaler", StandardScaler(with_mean=False))
-                ]
-            )
+    def get_risk_score(self, region: str) -> float:
+        normalized_region = region.replace(' ', '_')
+        return getattr(self, normalized_region, self.Unknown)
 
-            logging.info(f"Categorical columns: {self.data_transformation_config.categorical_columns}")
-            logging.info(f"Numerical columns: {self.data_transformation_config.numerical_columns}")
+@dataclass
+class FeatureMappingConfig:
+    column_mapping: Dict[str, str]
+    education_mapping: Dict[str, str]
+    job_mapping: Dict[str, str]
+    marital_mapping: Dict[str, str]
+    gender_mapping: Dict[str, str]
+    isactiveproject_mapping: Dict[str, str] = field(default_factory=dict)
+    isactive_mapping: Dict[str, str] = field(default_factory=dict)
 
-            preprocessor = ColumnTransformer(
-                [
-                    ("num_pipeline", num_pipeline, self.data_transformation_config.numerical_columns),
-                    ("cat_pipelines", cat_pipeline, self.data_transformation_config.categorical_columns)
-                ]
-            )
+    def get_mapping_dict(self, mapping_name: str) -> Dict[str, str]:
+        return getattr(self, mapping_name, {})
 
-            return preprocessor
+@dataclass
+class FeatureEncodingConfig:
+    categorical_cols: List[str]
 
-        except Exception as e:
-            raise CustomException(e, sys)
+@dataclass
+class ScalingConfig:
+    exclude_columns: List[str]
 
-    def initiate_data_transformation(self, train_path, test_path):
-        """
-        Eğitim ve test verilerine dönüşüm uygular.
-        """
-        try:
-            train_df = pd.read_csv(train_path)
-            test_df = pd.read_csv(test_path)
+@dataclass
+class ModelInputSelectionConfig:
+    include_columns: List[str]
 
-            logging.info("Read train and test data completed")
-            logging.info("Obtaining preprocessing object")
+class ConfigManager:
+    def __init__(self, config_path: Path = None, model_type: str = "loan"):
+        self.config_path = config_path or (Path(__file__).parent / 'config.yaml')
+        self.model_type = model_type
+        self.load_config()
 
-            preprocessing_obj = self.get_data_transformer_object()
+    def load_config(self):
+        with open(self.config_path, 'r', encoding='utf-8') as file:
+            cfg = yaml.safe_load(file)
 
-            target_column_name = self.data_transformation_config.target_column
+        model_cfg = cfg[self.model_type]
+        
+        self.feature_selection = FeatureSelectionConfig(**model_cfg['feature_selection'])
+        self.data_types = DataTypeConfig(**model_cfg['data_types'])
+        self.missing_values = MissingValuesConfig(**model_cfg['missing_values'])
+        self.region_mapping = RegionMappingConfig(**model_cfg['region_mapping'])
+        self.default_risk_scores = DefaultRiskScoresConfig(**model_cfg['default_risk_scores'])
+        self.feature_mapping = FeatureMappingConfig(**model_cfg['feature_mapping'])
+        self.feature_encoding = FeatureEncodingConfig(**model_cfg['feature_encoding'])
+        self.scaling = ScalingConfig(**model_cfg['scaling'])
+        self.model_input_selection = ModelInputSelectionConfig(**model_cfg['model_input_selection'])
 
-            input_feature_train_df = train_df.drop(columns=[target_column_name], axis=1)
-            target_feature_train_df = train_df[target_column_name]
-
-            input_feature_test_df = test_df.drop(columns=[target_column_name], axis=1)
-            target_feature_test_df = test_df[target_column_name]
-
-            logging.info("Applying preprocessing object on training and testing dataframes.")
-
-            input_feature_train_arr = preprocessing_obj.fit_transform(input_feature_train_df)
-            input_feature_test_arr = preprocessing_obj.transform(input_feature_test_df)
-
-            train_arr = np.c_[
-                input_feature_train_arr, np.array(target_feature_train_df)
-            ]
-            test_arr = np.c_[input_feature_test_arr, np.array(target_feature_test_df)]
-
-            logging.info("Saving preprocessing object.")
-
-            save_object(
-                file_path=self.data_transformation_config.preprocessor_obj_file_path,
-                obj=preprocessing_obj
-            )
-
-            return (
-                train_arr,
-                test_arr,
-                self.data_transformation_config.preprocessor_obj_file_path,
-            )
-        except Exception as e:
-            raise CustomException(e, sys)
+    def reload(self):
+        self.load_config()
