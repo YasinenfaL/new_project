@@ -1,118 +1,90 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-lokasyon_risk_v3.py — MinMax Scaler, Topsis Risk Skoru, 0–100 Ölçek
-"""
 import pandas as pd
 import numpy as np
-from scipy.stats.mstats import winsorize
-from sklearn.preprocessing import MinMaxScaler
-from numpy.linalg import norm
+from sklearn.model_selection import train_test_split
+import lightgbm as lgb
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import pickle, gzip
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Yardımcı Fonksiyonlar
-# ─────────────────────────────────────────────────────────────────────────────
-def safe_div(numer, denom):
-    """Sıfıra bölünmeyi engelle (0/0 → 0)."""
-    denom = denom.replace(0, np.nan)
-    return (numer / denom).fillna(0)
+# --- 1) Veri Hazırlığı ---
+# df: DataFrame'iniz
+# target_column: Hedef sütun adı
+# Örn: df = pd.read_csv('data.csv'); target_column = 'sales'
+X = df.drop(target_column, axis=1)
+y_raw = df[target_column]
 
+# Log1p dönüşümü (log ölçeğine alma)
+y = np.log1p(y_raw)
 
-def entropy_weights(X: pd.DataFrame) -> pd.Series:
-    """
-    Entropi tabanlı bilgi-ağırlığı.
-    X : 0–1 ölçekli, yön uygulanmış DataFrame.
-    """
-    P = X.abs().div(X.abs().sum(axis=0) + 1e-9, axis=1)
-    n = len(X)
-    k = 1.0 / np.log(n + 1e-9)
-    ej = -k * (P * np.log(P + 1e-9)).sum(axis=0)
-    dj = 1.0 - ej
-    return dj / dj.sum()
+# --- 2) Train/Test Ayrımı (son %20'si test) ---
+X_train, X_test, y_train_log, y_test_log = train_test_split(
+    X, y, test_size=0.2, shuffle=False
+)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Ana Akış
-# ─────────────────────────────────────────────────────────────────────────────
-def main():
-    # 1) Veri Yükle ve Lokasyon Anahtarı
-    df = pd.read_excel("veri.xlsx")
-    df["Lokasyon"] = (
-        df["İl"].str.strip() + "_" +
-        df["İlçe"].str.strip() + "_" +
-        df["Mahalle"].str.strip()
-    )
+# --- 3) İlk Model: Feature Importance için Eğitim ---
+best_params = {
+    'learning_rate': 0.05,
+    'num_leaves': 31,
+    'n_estimators': 200,
+    'max_depth': -1,
+    'min_child_samples': 20,
+    # ... diğer en iyi parametreleriniz
+}
+model_fs = lgb.LGBMRegressor(**best_params)
+model_fs.fit(X_train, y_train_log)
 
-    # 2) Feature-Engineering
-    df_feat = df.copy()
-    df_feat["depend_ratio"]        = safe_div(df["0-15 Kişi Sayısı"] + df["55+ Kişi Sayısı"],
-                                                    df["15-25 Kişi Sayısı"] + df["25-40 Kişi Sayısı"] + df["40-55 Kişi Sayısı"])
-    df_feat["female_share"]        = safe_div(df["Kadın Nüfusu"], df["Toplam Nüfus"])
-    df_feat["syria_share"]         = safe_div(df["Geçici Koruma Kapsamındaki Suriyeli Sayısı"], df["Toplam Nüfus"])
-    df_feat["foreign_share"]       = safe_div(df["İkamet Eden Yabancı"], df["Toplam Nüfus"])
-    df_feat["income_per_house"]    = safe_div(df["Aylık Ortalama Hane Geliri"], df["Hanehalkı Sayısı"])
-    df_feat["saving_rate"]         = safe_div(df["Aylık Hane Tasarrufu"], df["Aylık Ortalama Hane Harcaması"])
-    df_feat["spending_propensity"] = safe_div(df["Aylık Ortalama Hane Harcaması"], df["Aylık Ortalama Hane Geliri"])
-    df_feat["credit_per_capita"]   = safe_div(df["Bireysel Kredi (Bin TL)"], df["Toplam Nüfus"])
-    df_feat["card_per_adult"]      = safe_div(df["Kredi Kartı Sayısı"], df["15-55 Kişi Sayısı"])
-    df_feat["deposit_per_capita"]  = safe_div(df["Toplam Mevduat (BinTL)"], df["Toplam Nüfus"])
-    df_feat["loan_to_deposit"]     = safe_div(df["Bireysel Kredi (Bin TL)"], df["Toplam Mevduat (BinTL)"])
-    df_feat["employment_rate"]     = df["Çalışan Oran"]
-    df_feat["firm_density"]        = safe_div(df["İş Yeri Sayısı Kent (Adet)"], df["Toplam Nüfus"])
-    df_feat["atm_credit_ratio"]    = safe_div(df["Banka Kartı Sayısı"] + df["Kredi Kartı Sayısı"], df["Toplam Nüfus"])
-    df_feat["uni_rate"]            = safe_div(df["Üniversitede Okuyan Öğrenci sayısı"], df["Toplam Nüfus"])
-    df_feat["literacy_inv"]        = 1 - safe_div(df["Okur Yazarlık Sayısı"], df["Toplam Nüfus"])
-    df_feat["household_per_house"] = safe_div(df["Hanehalkı Sayısı"], df["Konut Sayısı"])
-    df_feat["vacancy_proxy"]       = safe_div(df["Konut Sayısı"] - df["Hanehalkı Sayısı"], df["Konut Sayısı"])
+# Normalize edilmiş feature importances
+importances = pd.Series(model_fs.feature_importances_, index=X_train.columns)
+importances /= importances.sum()
 
-    FEATURES = [
-        "depend_ratio","female_share","syria_share","foreign_share",
-        "income_per_house","saving_rate","spending_propensity",
-        "credit_per_capita","card_per_adult","deposit_per_capita","loan_to_deposit",
-        "employment_rate","firm_density","atm_credit_ratio",
-        "uni_rate","literacy_inv","household_per_house","vacancy_proxy",
-    ]
+# 0.01'den büyük olan özellikleri seç
+selected_features = importances[importances > 0.01].index.tolist()
+print("Seçilen Özellikler:", selected_features)
 
-    DIRECTION = {col: +1 for col in FEATURES}
-    for col in ["income_per_house","saving_rate","deposit_per_capita","employment_rate","uni_rate"]:
-        DIRECTION[col] = -1
+# Alt kümeleri oluştur
+X_train_sel = X_train[selected_features]
+X_test_sel  = X_test[selected_features]
 
-    for col in FEATURES:
-        df_feat[col] = winsorize(df_feat[col], limits=[0.01, 0.01])
+# --- 4) Nihai Model Eğitimi ---
+model = lgb.LGBMRegressor(**best_params)
+model.fit(X_train_sel, y_train_log)
 
-    scaler = MinMaxScaler()
-    X_scaled = pd.DataFrame(
-        scaler.fit_transform(df_feat[FEATURES]),
-        columns=FEATURES,
-        index=df_feat.index
-    )
+# --- 5) Tahminler (log ölçekli) ---
+y_train_pred_log = model.predict(X_train_sel)
+y_test_pred_log  = model.predict(X_test_sel)
 
-    X_dir = X_scaled.mul(pd.Series(DIRECTION), axis=1)
+# --- 6) Orijinal Ölçeğe Geri Dönüşüm ---
+inv_func = np.expm1  # log1p'in inverse fonksiyonu
+y_train_true = inv_func(y_train_log)
+y_train_pred = inv_func(y_train_pred_log)
+y_test_true  = inv_func(y_test_log)
+y_test_pred  = inv_func(y_test_pred_log)
 
-    w_raw = entropy_weights(X_dir)
+# --- 7) Metrik Hesaplama ---
+def compute_metrics(y_true, y_pred):
+    mae  = mean_absolute_error(y_true, y_pred)
+    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    r2   = r2_score(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    return mae, rmse, r2, mape
 
-    # TOPSIS tabanlı risk skoru
-    ideal     = X_dir.max()
-    antiideal = X_dir.min()
-    d_plus  = norm(X_dir - ideal, axis=1)
-    d_minus = norm(X_dir - antiideal, axis=1)
-    df_feat["risk_score"] = (d_plus / (d_plus + d_minus + 1e-9)) * 100
+train_mae, train_rmse, train_r2, train_mape = compute_metrics(y_train_true, y_train_pred)
+test_mae,  test_rmse,  test_r2,  test_mape  = compute_metrics(y_test_true,  y_test_pred)
 
-    lokasyon_risk = (
-        df_feat.groupby("Lokasyon")["risk_score"]
-               .mean()
-               .reset_index(name="risk_score")
-    )
+# Sonuçları yazdır
+print("\n=== TRAIN METRİKLERİ ===")
+print(f"MAE:  {train_mae:.4f}")
+print(f"RMSE: {train_rmse:.4f}")
+print(f"R²:   {train_r2:.4f}")
+print(f"MAPE: {train_mape:.2f}%")
 
-    lokasyon_risk["risk_group"] = pd.qcut(
-        lokasyon_risk["risk_score"], q=4,
-        labels=["Düşük","Orta-Düşük","Orta-Yüksek","Yüksek"]
-    )
+print("\n=== TEST METRİKLERİ ===")
+print(f"MAE:  {test_mae:.4f}")
+print(f"RMSE: {test_rmse:.4f}")
+print(f"R²:   {test_r2:.4f}")
+print(f"MAPE: {test_mape:.2f}%")
 
-    lokasyon_risk.to_csv("lokasyon_risk_scores_v3.csv", index=False)
-    print("--- En Riskli 10 Lokasyon ---")
-    print(lokasyon_risk.nlargest(10, "risk_score"))
+# --- 8) Modeli Gzip ile Kaydetme ---
+with gzip.open('lgbm_model_selected.pkl.gz', 'wb') as f:
+    pickle.dump(model, f)
 
-if __name__ == "__main__":
-    main()
-
-
+print("\nModel 'lgbm_model_selected.pkl.gz' olarak kaydedildi.")
